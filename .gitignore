@@ -1,0 +1,5 @@
+.clasp.json
+.claude/
+.vscode/
+node_modules/
+*.log
