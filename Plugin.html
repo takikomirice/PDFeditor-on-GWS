@@ -1,0 +1,3647 @@
+(function () {
+  window.__PDF_EDITOR_PLUGIN_STATUS__ = window.__PDF_EDITOR_PLUGIN_STATUS__ || {};
+  window.__PDF_EDITOR_PLUGIN_STATUS__.assetReturned = true;
+  window.__PDF_EDITOR_PLUGIN_STATUS__.loaded = false;
+  window.__PDF_EDITOR_PLUGIN_STATUS__.registered = 0;
+  window.__PDF_EDITOR_PLUGIN_STATUS__.pluginIds = [];
+
+  function createPageTransformPlugin() {
+    return {
+      id: 'page-transform',
+      name: 'ページ調整',
+      setup: setup,
+      rotateSelectedPages: rotateSelectedPages,
+      applyCrop: applyCrop,
+      applyMargins: applyMargins,
+      applyPageSize: applyPageSize,
+      applyContentShrink: applyContentShrink,
+    };
+  }
+
+  function createInsertToolsPlugin() {
+    return {
+      id: 'insert-tools',
+      name: '挿入ツール',
+      setup: setupInsertTools,
+      applyShape: applyShape,
+      applyImage: applyImage,
+      applyQrImage: applyQrImage,
+      generateQrPng: generateQrPngBytes,
+      setEditingMode: setEditingMode,
+      mountOrUpdateEditLayers: mountOrUpdateEditLayers,
+      screenRectToPdfRect: screenRectToPdfRect,
+      pdfRectToScreenRect: pdfRectToScreenRect,
+      getPageViewportInfo: getPageViewportInfo,
+      createTemporaryObject: createTemporaryObject,
+      getTemporaryObjects: getTemporaryObjects,
+      moveTemporaryObject: moveTemporaryObject,
+      moveLineEndpoint: moveLineEndpoint,
+      resizeTemporaryObject: resizeTemporaryObject,
+      updateTemporaryObjectOptions: updateTemporaryObjectOptions,
+      cancelTemporaryObject: cancelTemporaryObject,
+      deleteTemporaryObject: deleteTemporaryObject,
+      applyTemporaryObjects: applyTemporaryObjects,
+      applyTemporaryObject: applyTemporaryObject,
+    };
+  }
+
+  function createStampToolsPlugin() {
+    return {
+      id: 'stamp-tools',
+      name: 'スタンプ',
+      setup: setupStampTools,
+      applyPageNumbers: applyPageNumbers,
+      applyDateStamp: applyDateStamp,
+      applyFixedStamp: applyFixedStamp,
+    };
+  }
+
+  function createFormFlattenPlugin() {
+    return {
+      id: 'form-flatten',
+      name: 'フォーム固定',
+      setup: setupFormFlatten,
+      flattenForm: flattenForm,
+    };
+  }
+
+  const PT_PER_MM = 72 / 25.4;
+  const PAGE_SIZE_PRESETS_MM = {
+    'a3-portrait': { width: 297, height: 420 },
+    'a3-landscape': { width: 420, height: 297 },
+    'a4-portrait': { width: 210, height: 297 },
+    'a4-landscape': { width: 297, height: 210 },
+    'a5-portrait': { width: 148, height: 210 },
+    'a5-landscape': { width: 210, height: 148 },
+    'b4-portrait': { width: 257, height: 364 },
+    'b4-landscape': { width: 364, height: 257 },
+    'b5-portrait': { width: 182, height: 257 },
+    'b5-landscape': { width: 257, height: 182 },
+  };
+  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+  const MIN_TEMP_OBJECT_PT = 8;
+  const SVG_NAMESPACE = 'http:' + '//www.w3.org/2000/svg';
+  const LINE_MARKER_NONE = 'none';
+  const LINE_MARKER_DOT = 'dot';
+  const LINE_MARKER_ARROW = 'arrow';
+  const WATERMARK_STAMP_DEFAULT_TEXT = 'SAMPLE';
+  const FIXED_STAMP_WIDTH_MM = 90;
+  const FIXED_STAMP_HEIGHT_MM = 30;
+  const FIXED_STAMP_OPACITY = 0.35;
+  const FIXED_STAMP_ROTATE = -25;
+  const PluginObjectStore = {
+    objects: [],
+    selectedId: null,
+    editing: false,
+    nextId: 1,
+    ctx: null,
+    drag: null,
+    observer: null,
+    keyboardInstalled: false,
+  };
+
+  registerBundledPlugins();
+
+  function registerBundledPlugins() {
+    try {
+      if (!window.PDFEditorPlugins) {
+        window.__PDF_EDITOR_PLUGIN_STATUS__.error = 'PDFEditorPlugins context is missing';
+        console.warn('[PDF Editor Plugin] PDFEditorPlugins context is missing.');
+        return;
+      }
+
+      window.PDFEditorPlugins.register(createPageTransformPlugin());
+      window.PDFEditorPlugins.register(createInsertToolsPlugin());
+      window.PDFEditorPlugins.register(createStampToolsPlugin());
+      window.PDFEditorPlugins.register(createFormFlattenPlugin());
+
+      window.__PDF_EDITOR_PLUGIN_STATUS__.loaded = true;
+      window.__PDF_EDITOR_PLUGIN_STATUS__.registered = window.PDFEditorPlugins.plugins.length;
+      window.__PDF_EDITOR_PLUGIN_STATUS__.pluginIds = window.PDFEditorPlugins.plugins.map(plugin => plugin.id);
+    } catch (err) {
+      window.__PDF_EDITOR_PLUGIN_STATUS__.error = err && err.message ? err.message : String(err);
+      console.error('[PDF Editor Plugin] Failed to initialize.', err);
+    }
+  }
+
+  function setup(ctx) {
+    installStyles();
+    installModals(ctx);
+    installMenuItems(ctx);
+  }
+
+  function setupInsertTools(ctx) {
+    PluginObjectStore.ctx = ctx;
+    installStyles();
+    installInsertModals(ctx);
+    installInsertMenuItems(ctx);
+    installEditLayerController(ctx);
+  }
+
+  function setupStampTools(ctx) {
+    PluginObjectStore.ctx = ctx;
+    installStyles();
+    installStampModals(ctx);
+    installStampMenuItems(ctx);
+    installEditLayerController(ctx);
+  }
+
+  function setupFormFlatten(ctx) {
+    installStyles();
+    installFormFlattenModal(ctx);
+    installFormFlattenMenuItems(ctx);
+  }
+
+  function installMenuItems(ctx) {
+    ensureTopMenu(ctx, 'page-tools', 'ページ調整');
+    ctx.addMenuItem('page-tools', {
+      label: '右に90度回転',
+      action: () => rotateSelectedPages(ctx, 90),
+    });
+    ctx.addMenuItem('page-tools', {
+      label: '左に90度回転',
+      action: () => rotateSelectedPages(ctx, -90),
+    });
+    ctx.addMenuItem('page-tools', {
+      label: '180度回転',
+      action: () => rotateSelectedPages(ctx, 180),
+    });
+    ctx.addMenuItem('page-tools', {
+      label: 'トリミング/余白調整',
+      action: () => openModal(ctx, 'page-transform-crop-modal'),
+    });
+    ctx.addMenuItem('page-tools', {
+      label: '余白追加/内容縮小',
+      action: () => openModal(ctx, 'page-transform-margin-modal'),
+    });
+    ctx.addMenuItem('page-tools', {
+      label: 'ページサイズ変更',
+      action: () => openModal(ctx, 'page-transform-size-modal'),
+    });
+  }
+
+  function installInsertMenuItems(ctx) {
+    ensureTopMenu(ctx, 'insert-tools', '挿入');
+    ctx.addMenuItem('insert-tools', {
+      label: '画像を挿入',
+      action: () => openModal(ctx, 'insert-tools-image-modal'),
+    });
+    ctx.addMenuItem('insert-tools', {
+      label: 'QRコードを挿入',
+      action: () => openModal(ctx, 'insert-tools-qr-modal'),
+    });
+    ctx.addMenuItem('insert-tools', {
+      label: '図形・直線を挿入',
+      action: () => openShapeModal(ctx, 'rectangle'),
+    });
+  }
+
+  function installStampMenuItems(ctx) {
+    ensureTopMenu(ctx, 'insert-tools', '挿入');
+    ctx.addMenuItem('insert-tools', {
+      label: 'ページ番号を挿入',
+      action: () => openModal(ctx, 'stamp-tools-page-number-modal'),
+    });
+    ctx.addMenuItem('insert-tools', {
+      label: '日付を挿入',
+      action: () => openModal(ctx, 'stamp-tools-date-modal'),
+    });
+    ctx.addMenuItem('insert-tools', {
+      label: '透かしスタンプ',
+      action: () => openModal(ctx, 'stamp-tools-fixed-modal'),
+    });
+  }
+
+  function installFormFlattenMenuItems(ctx) {
+    ctx.addMenuItem('edit', {
+      label: 'フォームを固定',
+      action: () => openModal(ctx, 'form-flatten-modal'),
+    });
+  }
+
+  function ensureTopMenu(ctx, menuId, label) {
+    if (ctx && typeof ctx.addTopMenu === 'function') {
+      ctx.addTopMenu(menuId, label);
+    }
+  }
+
+  function installStyles() {
+    if (typeof document === 'undefined' || document.getElementById('page-transform-plugin-style')) return;
+
+    const style = document.createElement('style');
+    style.id = 'page-transform-plugin-style';
+    style.textContent = [
+      '.plugin-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }',
+      '.plugin-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }',
+      '.plugin-field input, .plugin-field select { padding: 7px 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); }',
+      '.plugin-note { margin: 12px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }',
+      '.plugin-check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; }',
+      '.plugin-section-title { margin: 16px 0 8px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }',
+      '.plugin-modal-action { padding: 7px 12px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; }',
+      '.plugin-modal-action.primary { border-color: var(--accent); background: var(--accent); color: #fff; }',
+      '.plugin-modal-action:hover { filter: brightness(0.96); }',
+      '.preview-page.plugin-edit-layer-host { position: relative; }',
+      '.plugin-edit-layer { position: absolute; background: transparent; z-index: 2; pointer-events: none; }',
+      '.plugin-edit-layer.active { pointer-events: auto; }',
+      '.plugin-object { position: absolute; box-sizing: border-box; border: 2px solid var(--accent); background: rgba(255, 255, 255, 0.18); cursor: move; user-select: none; touch-action: none; }',
+      '.plugin-object img, .plugin-object-preview { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; object-fit: contain; box-sizing: border-box; pointer-events: none; }',
+      '.plugin-object svg { width: 100%; height: 100%; display: block; pointer-events: none; overflow: visible; }',
+      '.plugin-object-preview { color: #d32f2f; border: 2px solid currentColor; font-weight: 700; transform-origin: center; }',
+      '.plugin-object.plugin-vector-object { background: transparent; }',
+      '.plugin-object.plugin-line-object { background: transparent; border-color: rgba(33, 150, 243, 0.35); }',
+      '.plugin-object.selected { box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.25); }',
+      '.plugin-resize-handle { position: absolute; width: 10px; height: 10px; background: var(--accent); border: 1px solid #fff; border-radius: 50%; box-sizing: border-box; }',
+      '.plugin-resize-handle[data-handle="nw"] { left: -6px; top: -6px; cursor: nwse-resize; }',
+      '.plugin-resize-handle[data-handle="n"] { left: 50%; top: -6px; transform: translateX(-50%); cursor: ns-resize; }',
+      '.plugin-resize-handle[data-handle="ne"] { right: -6px; top: -6px; cursor: nesw-resize; }',
+      '.plugin-resize-handle[data-handle="e"] { right: -6px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }',
+      '.plugin-resize-handle[data-handle="se"] { right: -6px; bottom: -6px; cursor: nwse-resize; }',
+      '.plugin-resize-handle[data-handle="s"] { left: 50%; bottom: -6px; transform: translateX(-50%); cursor: ns-resize; }',
+      '.plugin-resize-handle[data-handle="sw"] { left: -6px; bottom: -6px; cursor: nesw-resize; }',
+      '.plugin-resize-handle[data-handle="w"] { left: -6px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }',
+      '.plugin-line-endpoint-handle { transform: translate(-50%, -50%); cursor: crosshair; }',
+      '.plugin-edit-toolbar { position: absolute; left: 0; top: -38px; display: flex; gap: 6px; padding: 4px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; box-shadow: var(--shadow-menu); white-space: nowrap; }',
+      '.plugin-edit-toolbar button { padding: 4px 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; font-size: 12px; }',
+      '.plugin-edit-toolbar button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }',
+      '.plugin-property-panel { position: absolute; left: 0; top: 100%; margin-top: 6px; display: flex; align-items: center; gap: 8px; padding: 6px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; box-shadow: var(--shadow-menu); font-size: 12px; white-space: nowrap; }',
+      '.plugin-property-panel label { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); }',
+      '.plugin-property-panel input[type="number"] { width: 58px; padding: 3px 4px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); }',
+      '.plugin-property-panel input[type="color"] { width: 28px; height: 24px; padding: 0; border: 1px solid var(--border-color); border-radius: 4px; background: transparent; }',
+      '.plugin-property-panel select { padding: 3px 4px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); }',
+    ].join('\n');
+
+    (document.head || document.body || document.documentElement).appendChild(style);
+  }
+
+  function installModals(ctx) {
+    createModal('page-transform-crop-modal', 'トリミング/余白調整', [
+      '<div class="plugin-form-grid">',
+      fieldHtml('page-transform-crop-top', '上 (mm)', '0'),
+      fieldHtml('page-transform-crop-right', '右 (mm)', '0'),
+      fieldHtml('page-transform-crop-bottom', '下 (mm)', '0'),
+      fieldHtml('page-transform-crop-left', '左 (mm)', '0'),
+      '</div>',
+      '<p class="plugin-note">適用対象: 選択ページ</p>',
+      '<p class="plugin-note">このトリミングは表示範囲の変更です。PDF内部の情報削除や墨消しではありません。</p>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: '適用', primary: true, action: () => applyCropFromModal(ctx) },
+    ]);
+
+    createModal('page-transform-margin-modal', '余白追加/内容縮小', [
+      '<div class="plugin-section-title">余白追加</div>',
+      '<div class="plugin-form-grid">',
+      fieldHtml('page-transform-margin-top', '上 (mm)', '0'),
+      fieldHtml('page-transform-margin-right', '右 (mm)', '0'),
+      fieldHtml('page-transform-margin-bottom', '下 (mm)', '0'),
+      fieldHtml('page-transform-margin-left', '左 (mm)', '0'),
+      '</div>',
+      '<div class="plugin-section-title">内容縮小</div>',
+      '<div class="plugin-form-grid">',
+      fieldHtml('page-transform-shrink-percent', '縮小率 (%)', '90'),
+      '</div>',
+      '<label class="plugin-check"><input type="checkbox" id="page-transform-shrink-center" checked>中央寄せ</label>',
+      '<p class="plugin-note">適用対象: 選択ページ</p>',
+    ].join(''), [
+      { label: '閉じる', close: true },
+      { label: '余白を追加', action: () => applyMarginsFromModal(ctx) },
+      { label: '内容を縮小', primary: true, action: () => applyContentShrinkFromModal(ctx) },
+    ]);
+
+    createModal('page-transform-size-modal', 'ページサイズ変更', [
+      '<label class="plugin-field">サイズ',
+      '<select id="page-transform-size-preset">',
+      '<option value="a3-portrait">A3縦</option>',
+      '<option value="a3-landscape">A3横</option>',
+      '<option value="a4-portrait">A4縦</option>',
+      '<option value="a4-landscape">A4横</option>',
+      '<option value="a5-portrait">A5縦</option>',
+      '<option value="a5-landscape">A5横</option>',
+      '<option value="b4-portrait">B4縦</option>',
+      '<option value="b4-landscape">B4横</option>',
+      '<option value="b5-portrait">B5縦</option>',
+      '<option value="b5-landscape">B5横</option>',
+      '<option value="custom">カスタム</option>',
+      '</select>',
+      '</label>',
+      '<div class="plugin-form-grid">',
+      fieldHtml('page-transform-size-width', 'カスタム幅 (mm)', '210'),
+      fieldHtml('page-transform-size-height', 'カスタム高さ (mm)', '297'),
+      '</div>',
+      '<label class="plugin-check"><input type="checkbox" id="page-transform-size-fit" checked>内容を縮小して収める</label>',
+      '<p class="plugin-note">チェックを外すと、内容はそのままの座標で保持します。</p>',
+      '<p class="plugin-note">適用対象: 選択ページ</p>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: '適用', primary: true, action: () => applyPageSizeFromModal(ctx) },
+    ]);
+  }
+
+  function installInsertModals(ctx) {
+    createModal('insert-tools-shape-modal', '図形・直線を挿入', [
+      '<label class="plugin-field">種類',
+      '<select id="insert-shape-kind"><option value="rectangle">四角</option><option value="ellipse">丸</option><option value="line">線</option></select>',
+      '</label>',
+      '<div class="plugin-form-grid">',
+      fieldHtml('insert-shape-width', '幅 mm', '50'),
+      fieldHtml('insert-shape-height', '高さ mm', '20'),
+      fieldHtml('insert-shape-line-width', '線の太さ pt', '1'),
+      fieldHtml('insert-shape-opacity', '透明度 0-1', '1'),
+      '</div>',
+      '<label class="plugin-field">色<input id="insert-shape-color" type="color" value="#d32f2f"></label>',
+      '<label class="plugin-check"><input type="checkbox" id="insert-shape-fill">塗りつぶし</label>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: '挿入', primary: true, action: () => applyShapeFromModal(ctx) },
+    ]);
+    installShapeModalKindDefaults();
+
+    createModal('insert-tools-image-modal', '画像を挿入', [
+      '<label class="plugin-field">PNG/JPEG画像<input id="insert-image-file" type="file" accept="image/png,image/jpeg"></label>',
+      sizeFieldsHtml('insert-image', '60', '40'),
+      '<label class="plugin-check"><input type="checkbox" id="insert-image-keep-aspect" checked>縦横比を維持</label>',
+      fieldHtml('insert-image-opacity', '透明度 0-1', '1'),
+      '<p class="plugin-note">画像はページ中央に仮配置されます。PDF上でドラッグ移動・リサイズしてから「適用」を押してください。</p>',
+      '<p class="plugin-note">画像はブラウザ内で読み込み、外部送信しません。</p>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: '挿入', primary: true, action: () => applyImageFromModal(ctx) },
+    ]);
+
+    createModal('insert-tools-qr-modal', 'QRコードを挿入', [
+      '<label class="plugin-field">URLまたは文字列<input id="insert-qr-text" type="text" value=""></label>',
+      '<div class="plugin-form-grid">',
+      fieldHtml('insert-qr-size', 'サイズ mm', '35'),
+      fieldHtml('insert-qr-opacity', '透明度 0-1', '1'),
+      '</div>',
+      '<label class="plugin-check"><input type="checkbox" id="insert-qr-background" checked>余白・白背景を付ける</label>',
+      '<p class="plugin-note">QRコードはブラウザ内で生成し、ページ中央に仮配置されます。PDF上でドラッグ移動・リサイズしてから「適用」を押してください。外部サービスは使用しません。</p>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: '挿入', primary: true, action: () => applyQrFromModal(ctx) },
+    ]);
+  }
+
+  function installShapeModalKindDefaults() {
+    const shapeSelect = document.getElementById('insert-shape-kind');
+    if (!shapeSelect) return;
+    shapeSelect.addEventListener('change', syncShapeModalDefaults);
+    syncShapeModalDefaults();
+  }
+
+  function installStampModals(ctx) {
+    createModal('stamp-tools-page-number-modal', 'ページ番号を挿入', [
+      pageRangeTargetHtml('page-number'),
+      '<label class="plugin-field">表示形式',
+      '<select id="page-number-format"><option value="number">1</option><option value="total">1 / 10</option><option value="page">Page 1</option><option value="p">p.1</option></select>',
+      '</label>',
+      positionSelectHtml('page-number-position', 'bottom-center'),
+      '<div class="plugin-form-grid">',
+      fieldHtml('page-number-margin', '余白 mm', '10'),
+      fieldHtml('page-number-font-size', 'フォントサイズ', '10'),
+      '</div>',
+      '<label class="plugin-field">色<input id="page-number-color" type="color" value="#000000"></label>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: '挿入', primary: true, action: () => applyPageNumbersFromModal(ctx) },
+    ]);
+
+    createModal('stamp-tools-date-modal', '日付を挿入', [
+      '<label class="plugin-field">日付文字列<input id="date-stamp-text" type="text" value="' + todayIsoDate() + '"></label>',
+      '<label class="plugin-field">形式',
+      '<select id="date-stamp-format"><option value="yyyy-mm-dd">YYYY-MM-DD</option><option value="yyyy/mm/dd">YYYY/MM/DD</option><option value="jp">YYYY年M月D日</option></select>',
+      '</label>',
+      pageRangeTargetHtml('date-stamp'),
+      positionSelectHtml('date-stamp-position', 'top-right'),
+      '<div class="plugin-form-grid">',
+      fieldHtml('date-stamp-margin', '余白 mm', '10'),
+      fieldHtml('date-stamp-font-size', 'フォントサイズ', '10'),
+      '</div>',
+      '<label class="plugin-field">色<input id="date-stamp-color" type="color" value="#000000"></label>',
+      '<p class="plugin-note">日付スタンプは指定したページの選択位置に固定配置します。</p>',
+      '<p class="plugin-note">日本語形式はcanvasで画像化して貼り付けます。日本語フォントファイルは同梱しません。</p>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: '挿入', primary: true, action: () => applyDateStampFromModal(ctx) },
+    ]);
+
+    createModal('stamp-tools-fixed-modal', '透かしスタンプ', [
+      watermarkStampTextHtml(),
+      fixedStampTargetHtml(),
+      '<label class="plugin-field">色<input id="fixed-stamp-color" type="color" value="#d32f2f"></label>',
+      '<p class="plugin-note">透かしをページ中央へ固定配置します。</p>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: '挿入', primary: true, action: () => applyFixedStampFromModal(ctx) },
+    ]);
+    installPageRangeTargetToggles('page-number');
+    installPageRangeTargetToggles('date-stamp');
+    installFixedStampModalToggles();
+  }
+
+  function installFormFlattenModal(ctx) {
+    createModal('form-flatten-modal', 'フォームを固定', [
+      '<p class="plugin-note">入力欄を編集できない通常のPDF表示に固定します。元に戻すにはUndoを使ってください。</p>',
+      '<p class="plugin-note">これは既存PDFのAcroForm入力欄を固定する機能です。図形やスタンプは挿入時点でPDF内容に焼き込まれます。</p>',
+    ].join(''), [
+      { label: 'キャンセル', close: true },
+      { label: 'フォームを固定', primary: true, action: () => flattenFormFromModal(ctx) },
+    ]);
+  }
+
+  function placementFieldsHtml(prefix, x, y, width, height) {
+    return sizeFieldsHtml(prefix, width, height);
+  }
+
+  function sizeFieldsHtml(prefix, width, height) {
+    return [
+      '<div class="plugin-form-grid">',
+      fieldHtml(prefix + '-width', '初期幅 mm', width),
+      fieldHtml(prefix + '-height', '初期高さ mm', height),
+      '</div>',
+    ].join('');
+  }
+
+  function fixedStampTargetHtml() {
+    return [
+      '<label class="plugin-field">入れるページ',
+      '<select id="fixed-stamp-target">',
+      '<option value="all">全ページ</option>',
+      '<option value="pages">指定したページ</option>',
+      '</select>',
+      '</label>',
+      '<label class="plugin-field" id="fixed-stamp-pages-field" style="display: none;">ページ指定',
+      '<input id="fixed-stamp-pages" type="text" placeholder="例: 1,3-5">',
+      '</label>',
+    ].join('');
+  }
+
+  function pageRangeTargetHtml(prefix) {
+    return [
+      '<label class="plugin-field">対象',
+      '<select id="' + prefix + '-target">',
+      '<option value="all">全ページ</option>',
+      '<option value="selected">選択ページ</option>',
+      '</select>',
+      '</label>',
+      '<label class="plugin-field" id="' + prefix + '-pages-field" style="display: none;">ページ指定',
+      '<input id="' + prefix + '-pages" type="text" placeholder="例: 1,3-5">',
+      '</label>',
+    ].join('');
+  }
+
+  function watermarkStampTextHtml() {
+    return [
+      '<label class="plugin-field">文言',
+      '<select id="fixed-stamp-text">',
+      '<option value="SAMPLE">SAMPLE</option>',
+      '<option value="取扱注意">取扱注意</option>',
+      '<option value="確認用">確認用</option>',
+      '<option value="社外秘">社外秘</option>',
+      '<option value="custom">カスタム</option>',
+      '</select>',
+      '</label>',
+      '<label class="plugin-field" id="fixed-stamp-custom-field" style="display: none;">カスタム文言',
+      '<input id="fixed-stamp-custom-text" type="text" placeholder="透かしに入れる文言">',
+      '</label>',
+    ].join('');
+  }
+
+  function installFixedStampModalToggles() {
+    const selectedTarget = document.getElementById('fixed-stamp-target');
+    const pagesField = document.getElementById('fixed-stamp-pages-field');
+    if (selectedTarget && pagesField) {
+      const syncTarget = () => {
+        pagesField.style.display = selectedTarget.value === 'pages' ? '' : 'none';
+      };
+      selectedTarget.addEventListener('change', syncTarget);
+      syncTarget();
+    }
+
+    const selectedText = document.getElementById('fixed-stamp-text');
+    const customField = document.getElementById('fixed-stamp-custom-field');
+    if (selectedText && customField) {
+      const syncText = () => {
+        customField.style.display = selectedText.value === 'custom' ? '' : 'none';
+      };
+      selectedText.addEventListener('change', syncText);
+      syncText();
+    }
+  }
+
+  function installPageRangeTargetToggles(prefix) {
+    const selectedTarget = document.getElementById(prefix + '-target');
+    const pagesField = document.getElementById(prefix + '-pages-field');
+    if (!selectedTarget || !pagesField) return;
+    const syncTarget = () => {
+      pagesField.style.display = selectedTarget.value === 'selected' ? '' : 'none';
+    };
+    selectedTarget.addEventListener('change', syncTarget);
+    syncTarget();
+  }
+
+  function positionSelectHtml(id, value) {
+    const options = [
+      ['bottom-center', '下中央'],
+      ['bottom-right', '下右'],
+      ['bottom-left', '下左'],
+      ['top-center', '上中央'],
+      ['top-right', '上右'],
+      ['top-left', '上左'],
+    ];
+    return '<label class="plugin-field">位置<select id="' + id + '">'
+      + options.map(option => '<option value="' + option[0] + '"' + (option[0] === value ? ' selected' : '') + '>' + option[1] + '</option>').join('')
+      + '</select></label>';
+  }
+
+  function fieldHtml(id, label, value) {
+    return '<label class="plugin-field">' + label
+      + '<input id="' + id + '" type="number" min="0" step="0.1" value="' + value + '">'
+      + '</label>';
+  }
+
+  function createModal(id, title, bodyHtml, actions) {
+    if (typeof document === 'undefined' || document.getElementById(id)) return;
+
+    const modal = document.createElement('div');
+    modal.id = id;
+    modal.className = 'modal-overlay';
+    modal.style.display = 'none';
+    modal.innerHTML = [
+      '<div class="modal-content">',
+      '<div class="modal-header">',
+      '<h2>' + title + '</h2>',
+      '<button class="modal-close" type="button" data-page-transform-close="' + id + '">&times;</button>',
+      '</div>',
+      '<div class="modal-body">' + bodyHtml + '</div>',
+      '<div class="modal-footer"></div>',
+      '</div>',
+    ].join('');
+
+    const footer = modal.querySelector('.modal-footer');
+    actions.forEach(action => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'plugin-modal-action' + (action.primary ? ' primary' : '');
+      button.textContent = action.label;
+      button.addEventListener('click', async () => {
+        if (action.close) {
+          closeModalById(id);
+          return;
+        }
+        await action.action();
+      });
+      if (footer) footer.appendChild(button);
+    });
+
+    const closeButton = modal.querySelector('.modal-close');
+    if (closeButton) closeButton.addEventListener('click', () => closeModalById(id));
+    modal.addEventListener('click', event => {
+      if (event.target === modal) closeModalById(id);
+    });
+
+    document.body.appendChild(modal);
+  }
+
+  function openModal(ctx, id) {
+    const modal = document.getElementById(id);
+    if (!modal) return;
+    if (ctx.openModal) ctx.openModal(modal);
+    else modal.style.display = 'flex';
+  }
+
+  function closeModalById(id) {
+    const modal = document.getElementById(id);
+    if (modal) modal.style.display = 'none';
+  }
+
+  async function applyCropFromModal(ctx) {
+    const applied = await applyCrop(ctx, {
+      top: readNumber('page-transform-crop-top'),
+      right: readNumber('page-transform-crop-right'),
+      bottom: readNumber('page-transform-crop-bottom'),
+      left: readNumber('page-transform-crop-left'),
+    });
+    if (applied) closeModalById('page-transform-crop-modal');
+  }
+
+  async function applyMarginsFromModal(ctx) {
+    const applied = await applyMargins(ctx, {
+      top: readNumber('page-transform-margin-top'),
+      right: readNumber('page-transform-margin-right'),
+      bottom: readNumber('page-transform-margin-bottom'),
+      left: readNumber('page-transform-margin-left'),
+    });
+    if (applied) closeModalById('page-transform-margin-modal');
+  }
+
+  async function applyPageSizeFromModal(ctx) {
+    const applied = await applyPageSize(ctx, {
+      preset: readValue('page-transform-size-preset') || 'a4-portrait',
+      width: readNumber('page-transform-size-width'),
+      height: readNumber('page-transform-size-height'),
+      fitContent: readChecked('page-transform-size-fit'),
+    });
+    if (applied) closeModalById('page-transform-size-modal');
+  }
+
+  async function applyContentShrinkFromModal(ctx) {
+    const applied = await applyContentShrink(ctx, {
+      percent: readNumber('page-transform-shrink-percent'),
+      center: readChecked('page-transform-shrink-center'),
+    });
+    if (applied) closeModalById('page-transform-margin-modal');
+  }
+
+  async function applyShapeFromModal(ctx) {
+    try {
+      const tab = ctx && typeof ctx.getActiveTab === 'function' ? ctx.getActiveTab() : null;
+      if (!tab) throw new Error('PDFを開いてください。');
+      const pageIndices = getTargetPageIndices(tab, 'selected');
+      if (pageIndices.length === 0) throw new Error('ページを選択してください。');
+      const kind = normalizeShapeKind(readValue('insert-shape-kind') || 'rectangle');
+      const width = mmToPt(kind === 'line'
+        ? readNonNegativeNumber(defaultValue(readNumber('insert-shape-width'), 50), '幅')
+        : readPositiveNumber(defaultValue(readNumber('insert-shape-width'), 50), '幅'));
+      const height = mmToPt(kind === 'line'
+        ? readNonNegativeNumber(defaultValue(readNumber('insert-shape-height'), 0), '高さ')
+        : readPositiveNumber(defaultValue(readNumber('insert-shape-height'), 20), '高さ'));
+      const strokeColor = readValue('insert-shape-color') || '#d32f2f';
+      const options = {
+        strokeColor: strokeColor,
+        fillColor: readChecked('insert-shape-fill') && kind !== 'line' ? strokeColor : null,
+        strokeWidth: readNonNegativeNumber(defaultValue(readNumber('insert-shape-line-width'), 1), '線の太さ'),
+        opacity: normalizeOpacity(defaultValue(readNumber('insert-shape-opacity'), 1)),
+      };
+
+      pageIndices.forEach(pageIndex => {
+        const viewport = getPageViewportInfo(pageIndex);
+        if (!viewport) throw new Error('ページ情報を取得できません。');
+        if (kind === 'line') {
+          createTemporaryObject(ctx, {
+            type: 'line',
+            pageIndex: pageIndex,
+            line: centeredTemporaryLine(viewport, width, height),
+            options: options,
+          });
+          return;
+        }
+
+        createTemporaryObject(ctx, {
+          type: kind === 'ellipse' ? 'ellipse' : 'rect',
+          pageIndex: pageIndex,
+          rect: centeredTemporaryRect(pageIndex, { width: width, height: height }),
+          options: options,
+        });
+      });
+      closeModalById('insert-tools-shape-modal');
+      showToast(ctx, '図形を仮配置しました。位置とサイズを調整して適用してください。', 'info');
+    } catch (err) {
+      showToast(ctx, err && err.message ? err.message : '入力値を確認してください。', 'warning');
+    }
+  }
+
+  function openShapeModal(ctx, kind) {
+    const shapeSelect = document.getElementById('insert-shape-kind');
+    if (shapeSelect) shapeSelect.value = kind || 'rectangle';
+    syncShapeModalDefaults();
+    openModal(ctx, 'insert-tools-shape-modal');
+  }
+
+  function syncShapeModalDefaults() {
+    const shapeSelect = document.getElementById('insert-shape-kind');
+    const heightInput = document.getElementById('insert-shape-height');
+    if (!shapeSelect || !heightInput) return;
+    const kind = normalizeShapeKind(shapeSelect.value);
+    if (kind === 'line') {
+      if (heightInput.value === '' || heightInput.value === '20') heightInput.value = '0';
+      return;
+    }
+    if (heightInput.value === '' || heightInput.value === '0') heightInput.value = '20';
+  }
+
+  async function applyImageFromModal(ctx) {
+    const prefix = 'insert-image';
+    try {
+      const tab = ctx && typeof ctx.getActiveTab === 'function' ? ctx.getActiveTab() : null;
+      if (!tab) throw new Error('PDFを開いてください。');
+      const pageIndices = getTargetPageIndices(tab, 'selected');
+      if (pageIndices.length === 0) throw new Error('ページを選択してください。');
+      const fileInput = document.getElementById('insert-image-file');
+      const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+      if (!file) throw new Error('画像ファイルを選択してください。');
+
+      const bytes = await readFileBytes(file);
+      const width = mmToPt(readPositiveNumber(defaultValue(readNumber(prefix + '-width'), 60), '幅'));
+      const height = mmToPt(readPositiveNumber(defaultValue(readNumber(prefix + '-height'), 40), '高さ'));
+      const previewUrl = createPreviewUrl(file);
+      const options = {
+        keepAspect: readChecked(prefix + '-keep-aspect'),
+        opacity: readNumber(prefix + '-opacity'),
+      };
+
+      pageIndices.forEach(pageIndex => {
+        createTemporaryObject(ctx, {
+          type: 'image',
+          pageIndex: pageIndex,
+          rect: centeredTemporaryRect(pageIndex, { width: width, height: height }),
+          data: {
+            imageBytes: bytes,
+            mimeType: file.type,
+            filename: file.name,
+            previewUrl: previewUrl,
+          },
+          options: options,
+        });
+      });
+      closeModalById('insert-tools-image-modal');
+      showToast(ctx, '画像を仮配置しました。位置とサイズを調整して適用してください。', 'info');
+    } catch (err) {
+      showToast(ctx, err && err.message ? err.message : '画像ファイルを読み込めませんでした。', 'warning');
+    }
+  }
+
+  async function applyQrFromModal(ctx) {
+    try {
+      const tab = ctx && typeof ctx.getActiveTab === 'function' ? ctx.getActiveTab() : null;
+      if (!tab) throw new Error('PDFを開いてください。');
+      const pageIndices = getTargetPageIndices(tab, 'selected');
+      if (pageIndices.length === 0) throw new Error('ページを選択してください。');
+      const text = String(readValue('insert-qr-text') || '').trim();
+      if (!text) throw new Error('QRコードにするURLまたは文字列を入力してください。');
+      const size = mmToPt(readPositiveNumber(defaultValue(readNumber('insert-qr-size'), 35), 'サイズ'));
+      const includeBackground = readChecked('insert-qr-background');
+      const qrBytes = generateQrPngBytes(text, { includeBackground: includeBackground });
+      const previewUrl = bytesToDataUrl(qrBytes, 'image/png');
+      const options = {
+        opacity: readNumber('insert-qr-opacity'),
+        includeBackground: includeBackground,
+      };
+
+      pageIndices.forEach(pageIndex => {
+        createTemporaryObject(ctx, {
+          type: 'qr',
+          pageIndex: pageIndex,
+          rect: centeredTemporaryRect(pageIndex, { width: size, height: size }),
+          data: {
+            text: text,
+            previewUrl: previewUrl,
+          },
+          options: options,
+        });
+      });
+      closeModalById('insert-tools-qr-modal');
+      showToast(ctx, 'QRコードを仮配置しました。位置とサイズを調整して適用してください。', 'info');
+    } catch (err) {
+      showToast(ctx, err && err.message ? err.message : '入力値を確認してください。', 'warning');
+    }
+  }
+
+  async function applyPageNumbersFromModal(ctx) {
+    const selectedTarget = readValue('page-number-target') || 'all';
+    const applied = await applyPageNumbers(ctx, {
+      target: selectedTarget === 'selected' ? 'pages:' + readValue('page-number-pages') : 'all',
+      format: readValue('page-number-format') || 'number',
+      position: readValue('page-number-position') || 'bottom-center',
+      margin: readNumber('page-number-margin'),
+      fontSize: readNumber('page-number-font-size'),
+      color: readValue('page-number-color') || '#000000',
+    });
+    if (applied) closeModalById('stamp-tools-page-number-modal');
+  }
+
+  async function applyDateStampFromModal(ctx) {
+    const selectedTarget = readValue('date-stamp-target') || 'all';
+    const applied = await applyDateStamp(ctx, {
+      target: selectedTarget === 'selected' ? 'pages:' + readValue('date-stamp-pages') : 'all',
+      text: readValue('date-stamp-text') || todayIsoDate(),
+      format: readValue('date-stamp-format') || 'yyyy-mm-dd',
+      position: readValue('date-stamp-position') || 'top-right',
+      margin: readNumber('date-stamp-margin'),
+      fontSize: readNumber('date-stamp-font-size'),
+      color: readValue('date-stamp-color') || '#000000',
+    });
+    if (applied) closeModalById('stamp-tools-date-modal');
+  }
+
+  async function applyFixedStampFromModal(ctx) {
+    const selectedTarget = readValue('fixed-stamp-target') || 'all';
+    const selectedText = readValue('fixed-stamp-text') || WATERMARK_STAMP_DEFAULT_TEXT;
+    const applied = await applyFixedStamp(ctx, {
+      text: selectedText === 'custom' ? readValue('fixed-stamp-custom-text') : selectedText,
+      target: selectedTarget === 'pages' ? 'pages:' + readValue('fixed-stamp-pages') : selectedTarget,
+      color: readValue('fixed-stamp-color') || '#d32f2f',
+    });
+    if (applied) closeModalById('stamp-tools-fixed-modal');
+  }
+
+  async function flattenFormFromModal(ctx) {
+    const applied = await flattenForm(ctx, { confirmed: true });
+    if (applied) closeModalById('form-flatten-modal');
+  }
+
+  function readNumber(id) {
+    const element = document.getElementById(id);
+    return element ? element.value : '';
+  }
+
+  function readValue(id) {
+    const element = document.getElementById(id);
+    return element ? element.value : '';
+  }
+
+  function readChecked(id) {
+    const element = document.getElementById(id);
+    return !!(element && element.checked);
+  }
+
+  function resolveModalTargetPage(ctx, target) {
+    const tab = ctx && typeof ctx.getActiveTab === 'function' ? ctx.getActiveTab() : null;
+    if (!tab) throw new Error('PDFを開いてください。');
+    if (target === 'active' && Array.isArray(tab.selectedPages) && tab.selectedPages.length > 0) {
+      return resolveTemporaryPageIndex(tab, tab.selectedPages[0]);
+    }
+    return resolveTemporaryPageIndex(tab, Array.isArray(tab.selectedPages) ? tab.selectedPages[0] : 0);
+  }
+
+  function centeredTemporaryRect(pageIndex, size) {
+    const viewport = getPageViewportInfo(pageIndex);
+    if (!viewport) throw new Error('ページ情報を取得できません。');
+    const width = Math.min(readPositiveNumber(size.width, '幅'), viewport.width);
+    const height = Math.min(readPositiveNumber(size.height, '高さ'), viewport.height);
+    return {
+      x: Math.max(0, (viewport.width - width) / 2),
+      y: Math.max(0, (viewport.height - height) / 2),
+      width: width,
+      height: height,
+    };
+  }
+
+  function createPreviewUrl(file) {
+    if (typeof URL !== 'undefined' && file) {
+      try {
+        return URL.createObjectURL(file);
+      } catch (err) {
+        return '';
+      }
+    }
+    return '';
+  }
+
+  function bytesToDataUrl(bytes, mimeType) {
+    if (typeof btoa !== 'function') return '';
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+    return 'data:' + (mimeType || 'image/png') + ';base64,' + btoa(binary);
+  }
+
+  function getEstimatedTextWidth(text, fontSize) {
+    return String(text || '').length * Number(fontSize || 10) * 0.65;
+  }
+
+  function installEditLayerController(ctx) {
+    PluginObjectStore.ctx = ctx;
+    installTemporaryKeyboardHandlers(ctx);
+    observePreviewContainer();
+    mountOrUpdateEditLayers();
+  }
+
+  function installTemporaryKeyboardHandlers(ctx) {
+    if (PluginObjectStore.keyboardInstalled || typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+    PluginObjectStore.keyboardInstalled = true;
+    document.addEventListener('keydown', event => {
+      if (!PluginObjectStore.editing) return;
+      const tagName = event && event.target && event.target.tagName ? event.target.tagName : '';
+      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT') return;
+      if (event.key === 'Escape') {
+        if (event.preventDefault) event.preventDefault();
+        clearTemporaryObjects(ctx);
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (event.preventDefault) event.preventDefault();
+        deleteTemporaryObject(PluginObjectStore.selectedId);
+      }
+    });
+  }
+
+  function observePreviewContainer() {
+    if (typeof document === 'undefined' || PluginObjectStore.observer) return;
+    const container = getPreviewContainer();
+    if (!container || typeof MutationObserver === 'undefined') return;
+    PluginObjectStore.observer = new MutationObserver(mutations => {
+      if (shouldScheduleLayerRender(mutations)) scheduleLayerRender();
+    });
+    PluginObjectStore.observer.observe(container, { childList: true, subtree: true });
+  }
+
+  function shouldScheduleLayerRender(mutations) {
+    const entries = Array.from(mutations || []);
+    if (entries.length === 0) return true;
+    return entries.some(mutation => !isPluginManagedMutation(mutation));
+  }
+
+  function isPluginManagedMutation(mutation) {
+    if (!mutation) return false;
+    if (isNodeInsidePluginEditLayer(mutation.target)) return true;
+    const nodes = Array.from(mutation.addedNodes || []).concat(Array.from(mutation.removedNodes || []));
+    return nodes.length > 0 && nodes.every(isPluginManagedNode);
+  }
+
+  function isPluginManagedNode(node) {
+    return hasElementClass(node, 'plugin-edit-layer')
+      || hasElementClass(node, 'plugin-object')
+      || isNodeInsidePluginEditLayer(node);
+  }
+
+  function isNodeInsidePluginEditLayer(node) {
+    let current = node;
+    while (current) {
+      if (hasElementClass(current, 'plugin-edit-layer')) return true;
+      current = current.parentNode || null;
+    }
+    return false;
+  }
+
+  function hasElementClass(node, className) {
+    if (!node) return false;
+    if (node.classList && typeof node.classList.contains === 'function') {
+      return node.classList.contains(className);
+    }
+    return String(node.className || '').split(/\s+/).indexOf(className) >= 0;
+  }
+
+  function scheduleLayerRender() {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => mountOrUpdateEditLayers());
+      return;
+    }
+    setTimeout(() => mountOrUpdateEditLayers(), 0);
+  }
+
+  function setEditingMode(enabled) {
+    PluginObjectStore.editing = !!enabled;
+    mountOrUpdateEditLayers();
+  }
+
+  function getPreviewContainer() {
+    return typeof document === 'undefined' ? null : document.querySelector('#preview-container');
+  }
+
+  function mountOrUpdateEditLayers() {
+    const container = getPreviewContainer();
+    if (!container) return [];
+    const pageElements = Array.from(container.querySelectorAll('.preview-page'));
+    const layers = [];
+    pageElements.forEach(pageElement => {
+      const canvas = getPreviewCanvas(pageElement);
+      if (!canvas) return;
+      if (pageElement.classList && typeof pageElement.classList.add === 'function') {
+        pageElement.classList.add('plugin-edit-layer-host');
+      } else {
+        pageElement.className += ' plugin-edit-layer-host';
+      }
+
+      let layer = pageElement.querySelector('.plugin-edit-layer');
+      if (!layer) {
+        layer = document.createElement('div');
+        layer.className = 'plugin-edit-layer';
+        if (typeof pageElement.insertBefore === 'function') {
+          pageElement.insertBefore(layer, canvas.nextSibling || null);
+        } else {
+          pageElement.appendChild(layer);
+        }
+      }
+
+      updateLayerBounds(pageElement, canvas, layer);
+      layer.style.pointerEvents = PluginObjectStore.editing ? 'auto' : 'none';
+      layer.className = PluginObjectStore.editing ? 'plugin-edit-layer active' : 'plugin-edit-layer';
+      layers.push(layer);
+    });
+    renderTemporaryObjects();
+    return layers;
+  }
+
+  function updateLayerBounds(pageElement, canvas, layer) {
+    const canvasRect = canvas.getBoundingClientRect();
+    const pageRect = typeof pageElement.getBoundingClientRect === 'function'
+      ? pageElement.getBoundingClientRect()
+      : { left: 0, top: 0 };
+    layer.style.left = roundCss(canvasRect.left - pageRect.left) + 'px';
+    layer.style.top = roundCss(canvasRect.top - pageRect.top) + 'px';
+    layer.style.width = roundCss(canvasRect.width) + 'px';
+    layer.style.height = roundCss(canvasRect.height) + 'px';
+  }
+
+  function getPreviewCanvas(pageElement) {
+    return pageElement && typeof pageElement.querySelector === 'function' ? pageElement.querySelector('canvas') : null;
+  }
+
+  function getPageViewportInfo(pageIndex) {
+    const tab = PluginObjectStore.ctx && typeof PluginObjectStore.ctx.getActiveTab === 'function'
+      ? PluginObjectStore.ctx.getActiveTab()
+      : null;
+    const index = Number(pageIndex);
+    if (!tab || !Number.isInteger(index) || index < 0 || index >= tab.pageCount) return null;
+    const page = tab.pdfDoc && typeof tab.pdfDoc.getPage === 'function' ? tab.pdfDoc.getPage(index) : null;
+    if (!page || typeof page.getSize !== 'function') return null;
+    const size = page.getSize();
+    const rotation = typeof page.getRotation === 'function' ? page.getRotation() : null;
+    return {
+      pageIndex: index,
+      width: size.width,
+      height: size.height,
+      rotation: rotation && Number.isFinite(rotation.angle) ? rotation.angle : 0,
+    };
+  }
+
+  function screenRectToPdfRect(pageElement, rect) {
+    const canvas = getPreviewCanvas(pageElement);
+    const pageIndex = readPageElementIndex(pageElement);
+    const viewport = getPageViewportInfo(pageIndex);
+    if (!canvas || !viewport) throw new Error('プレビュー座標を取得できません。');
+    const canvasRect = canvas.getBoundingClientRect();
+    const left = clamp(defaultValue(rect.left, rect.x), canvasRect.left, canvasRect.left + canvasRect.width);
+    const top = clamp(defaultValue(rect.top, rect.y), canvasRect.top, canvasRect.top + canvasRect.height);
+    const right = clamp(left + readPositiveNumber(defaultValue(rect.width, rect.right - left), '幅'), canvasRect.left, canvasRect.left + canvasRect.width);
+    const bottom = clamp(top + readPositiveNumber(defaultValue(rect.height, rect.bottom - top), '高さ'), canvasRect.top, canvasRect.top + canvasRect.height);
+    const scaleX = viewport.width / canvasRect.width;
+    const scaleY = viewport.height / canvasRect.height;
+    return normalizePdfRect({
+      x: (left - canvasRect.left) * scaleX,
+      y: viewport.height - (bottom - canvasRect.top) * scaleY,
+      width: (right - left) * scaleX,
+      height: (bottom - top) * scaleY,
+    }, viewport);
+  }
+
+  function pdfRectToScreenRect(pageElement, pdfRect) {
+    const canvas = getPreviewCanvas(pageElement);
+    const pageIndex = readPageElementIndex(pageElement);
+    const viewport = getPageViewportInfo(pageIndex);
+    if (!canvas || !viewport) throw new Error('プレビュー座標を取得できません。');
+    const canvasRect = canvas.getBoundingClientRect();
+    const rect = normalizePdfRect(pdfRect, viewport);
+    const scaleX = canvasRect.width / viewport.width;
+    const scaleY = canvasRect.height / viewport.height;
+    const left = canvasRect.left + rect.x * scaleX;
+    const top = canvasRect.top + (viewport.height - rect.y - rect.height) * scaleY;
+    const width = rect.width * scaleX;
+    const height = rect.height * scaleY;
+    return {
+      left: left,
+      top: top,
+      right: left + width,
+      bottom: top + height,
+      width: width,
+      height: height,
+    };
+  }
+
+  function readPageElementIndex(pageElement) {
+    return Number(pageElement && pageElement.dataset ? pageElement.dataset.pageIndex : 0);
+  }
+
+  function createTemporaryObject(ctx, spec) {
+    PluginObjectStore.ctx = ctx || PluginObjectStore.ctx;
+    const tab = PluginObjectStore.ctx && typeof PluginObjectStore.ctx.getActiveTab === 'function'
+      ? PluginObjectStore.ctx.getActiveTab()
+      : null;
+    if (!tab) throw new Error('PDFを開いてください。');
+    const pageIndex = resolveTemporaryPageIndex(tab, spec && spec.pageIndex);
+    const viewport = getPageViewportInfo(pageIndex);
+    if (!viewport) throw new Error('ページ情報を取得できません。');
+    const type = normalizeTemporaryObjectType(spec && (spec.type || spec.kind));
+    const line = type === 'line'
+      ? normalizePdfLine(spec && spec.line ? spec.line : defaultTemporaryLine(viewport, spec), viewport)
+      : null;
+    const options = normalizeTemporaryObjectOptions(type, spec && spec.options);
+    const object = {
+      id: 'plugin-object-' + PluginObjectStore.nextId++,
+      tabId: tab.id,
+      type: type,
+      pageIndex: pageIndex,
+      rect: line ? lineToPdfRect(line, viewport) : normalizePdfRect(spec && spec.rect ? spec.rect : defaultTemporaryRect(viewport, spec), viewport),
+      line: line,
+      data: Object.assign({}, spec && spec.data),
+      options: options,
+    };
+    PluginObjectStore.objects.push(object);
+    PluginObjectStore.selectedId = object.id;
+    setEditingMode(true);
+    renderTemporaryObjects();
+    return cloneTemporaryObject(object);
+  }
+
+  function getTemporaryObjects() {
+    return activeTemporaryObjects().map(cloneTemporaryObject);
+  }
+
+  function activeTemporaryObjects() {
+    const tab = PluginObjectStore.ctx && typeof PluginObjectStore.ctx.getActiveTab === 'function'
+      ? PluginObjectStore.ctx.getActiveTab()
+      : null;
+    if (!tab) return [];
+    return PluginObjectStore.objects.filter(object => object.tabId === tab.id);
+  }
+
+  function moveTemporaryObject(id, dx, dy) {
+    const object = findTemporaryObject(id);
+    if (!object) return null;
+    const viewport = getPageViewportInfo(object.pageIndex);
+    if (object.type === 'line') {
+      object.line = translatePdfLine(object.line, Number(dx || 0), Number(dy || 0), viewport);
+      object.rect = lineToPdfRect(object.line, viewport);
+      renderTemporaryObjects();
+      return cloneTemporaryObject(object);
+    }
+    object.rect = normalizePdfRect({
+      x: object.rect.x + Number(dx || 0),
+      y: object.rect.y + Number(dy || 0),
+      width: object.rect.width,
+      height: object.rect.height,
+    }, viewport);
+    renderTemporaryObjects();
+    return cloneTemporaryObject(object);
+  }
+
+  function resizeTemporaryObject(id, nextRect) {
+    const object = findTemporaryObject(id);
+    if (!object) return null;
+    const viewport = getPageViewportInfo(object.pageIndex);
+    if (object.type === 'line') {
+      object.line = normalizePdfLine(lineSpecFromRectOrLine(nextRect || {}, object.line), viewport);
+      object.rect = lineToPdfRect(object.line, viewport);
+      renderTemporaryObjects();
+      return cloneTemporaryObject(object);
+    }
+    const size = enforceTemporarySize(object, nextRect || {});
+    object.rect = normalizePdfRect({
+      x: defaultValue(nextRect.x, object.rect.x),
+      y: defaultValue(nextRect.y, object.rect.y),
+      width: size.width,
+      height: size.height,
+    }, viewport);
+    renderTemporaryObjects();
+    return cloneTemporaryObject(object);
+  }
+
+  function moveLineEndpoint(id, endpoint, x, y, options) {
+    const object = findTemporaryObject(id);
+    if (!object || object.type !== 'line') return null;
+    const viewport = getPageViewportInfo(object.pageIndex);
+    const line = Object.assign({}, object.line);
+    const point = normalizePdfPoint({ x: x, y: y }, viewport);
+    const isStart = String(endpoint || '').toLowerCase() === 'start';
+    const anchor = isStart
+      ? { x: line.x2, y: line.y2 }
+      : { x: line.x1, y: line.y1 };
+    const nextPoint = options && (options.snap === true || options.shiftKey === true)
+      ? snapLinePoint(anchor, point)
+      : point;
+    if (isStart) {
+      line.x1 = nextPoint.x;
+      line.y1 = nextPoint.y;
+    } else {
+      line.x2 = nextPoint.x;
+      line.y2 = nextPoint.y;
+    }
+    object.line = normalizePdfLine(line, viewport);
+    object.rect = lineToPdfRect(object.line, viewport);
+    renderTemporaryObjects();
+    return cloneTemporaryObject(object);
+  }
+
+  function updateTemporaryObjectOptions(id, options) {
+    const object = findTemporaryObject(id);
+    if (!object) return null;
+    object.options = normalizeTemporaryObjectOptions(object.type, Object.assign({}, object.options, options || {}));
+    renderTemporaryObjects();
+    return cloneTemporaryObject(object);
+  }
+
+  function cancelTemporaryObject(id) {
+    removeTemporaryObject(id || PluginObjectStore.selectedId);
+  }
+
+  function deleteTemporaryObject(id) {
+    removeTemporaryObject(id || PluginObjectStore.selectedId);
+  }
+
+  function clearTemporaryObjects(ctx) {
+    const tab = ctx && typeof ctx.getActiveTab === 'function' ? ctx.getActiveTab() : null;
+    PluginObjectStore.objects = tab
+      ? PluginObjectStore.objects.filter(object => object.tabId !== tab.id)
+      : [];
+    PluginObjectStore.selectedId = null;
+    PluginObjectStore.editing = false;
+    mountOrUpdateEditLayers();
+  }
+
+  function removeTemporaryObject(id) {
+    if (!id) return;
+    PluginObjectStore.objects = PluginObjectStore.objects.filter(object => object.id !== id);
+    if (PluginObjectStore.selectedId === id) {
+      const remaining = activeTemporaryObjects();
+      PluginObjectStore.selectedId = remaining.length ? remaining[remaining.length - 1].id : null;
+    }
+    if (activeTemporaryObjects().length === 0) PluginObjectStore.editing = false;
+    mountOrUpdateEditLayers();
+  }
+
+  async function applyTemporaryObject(ctx, id) {
+    return applyTemporaryObjects(ctx, id ? [id] : undefined);
+  }
+
+  async function applyTemporaryObjects(ctx, ids) {
+    PluginObjectStore.ctx = ctx || PluginObjectStore.ctx;
+    const selectedIds = Array.isArray(ids) && ids.length ? ids : activeTemporaryObjects().map(object => object.id);
+    const targets = activeTemporaryObjects().filter(object => selectedIds.indexOf(object.id) >= 0);
+    if (targets.length === 0) {
+      showToast(PluginObjectStore.ctx, '適用する仮配置がありません。', 'info');
+      return false;
+    }
+
+    const applied = await commitDocumentMutation(PluginObjectStore.ctx, 'plugin-edit-layer', '仮配置適用', async tab => {
+      for (const object of targets) {
+        const page = tab.pdfDoc.getPage(object.pageIndex);
+        await drawTemporaryObject(PluginObjectStore.ctx, tab, page, object);
+      }
+      return true;
+    }, '仮配置をPDFに反映しました。');
+
+    if (applied) {
+      PluginObjectStore.objects = PluginObjectStore.objects.filter(object => selectedIds.indexOf(object.id) < 0);
+      PluginObjectStore.selectedId = null;
+      PluginObjectStore.editing = activeTemporaryObjects().length > 0;
+      mountOrUpdateEditLayers();
+    }
+    return applied;
+  }
+
+  async function drawTemporaryObject(ctx, tab, page, object) {
+    if (object.type === 'image') {
+      const bytes = normalizeImageBytes(object.data.imageBytes || object.data.bytes);
+      const image = await embedRasterImage(tab.pdfDoc, bytes, object.data.mimeType, object.data.filename);
+      drawImageOnPage(page, image, object.rect, object.options);
+      return;
+    }
+
+    if (object.type === 'qr') {
+      const text = String(object.data.text || object.options.text || '').trim();
+      if (!text) throw new Error('QRコードにするURLまたは文字列を入力してください。');
+      const bytes = generateQrPngBytes(text, {
+        includeBackground: object.options.includeBackground !== false,
+      });
+      const image = await tab.pdfDoc.embedPng(bytes);
+      drawImageOnPage(page, image, object.rect, object.options);
+      return;
+    }
+
+    if (object.type === 'date-stamp') {
+      await drawDateStampObject(ctx, tab, page, object);
+      return;
+    }
+
+    if (object.type === 'rect' || object.type === 'ellipse') {
+      drawShapeOnPage(ctx, page, object.type, object.rect, object.options);
+      return;
+    }
+
+    if (object.type === 'line') {
+      drawLineObjectOnPage(ctx, page, object.line, object.options);
+      return;
+    }
+
+    await drawFixedStampObject(ctx, tab, page, object);
+  }
+
+  function drawShapeOnPage(ctx, page, kind, rect, options) {
+    const normalizedKind = kind === 'ellipse' ? 'ellipse' : 'rect';
+    const strokeColorValue = getTemporaryStrokeColor(options);
+    const fillColorValue = getTemporaryFillColor(options, strokeColorValue);
+    const strokeColor = parseColor(ctx, strokeColorValue);
+    const opacity = normalizeOpacity(options && options.opacity);
+    const borderWidth = readNonNegativeNumber(defaultValue(options && defaultValue(options.strokeWidth, options.lineWidth), 1), '線の太さ');
+
+    if (normalizedKind === 'ellipse') {
+      requireMethod(page, 'drawEllipse');
+      page.drawEllipse({
+        x: rect.x + rect.width / 2,
+        y: rect.y + rect.height / 2,
+        xScale: rect.width / 2,
+        yScale: rect.height / 2,
+        borderWidth: borderWidth,
+        borderColor: strokeColor,
+        borderOpacity: opacity,
+        color: fillColorValue ? parseColor(ctx, fillColorValue) : undefined,
+        opacity: opacity,
+      });
+      return;
+    }
+
+    requireMethod(page, 'drawRectangle');
+    page.drawRectangle({
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      borderWidth: borderWidth,
+      borderColor: strokeColor,
+      borderOpacity: opacity,
+      color: fillColorValue ? parseColor(ctx, fillColorValue) : undefined,
+      opacity: opacity,
+    });
+  }
+
+  function drawLineObjectOnPage(ctx, page, line, options) {
+    requireMethod(page, 'drawLine');
+    const strokeWidth = readNonNegativeNumber(defaultValue(options && defaultValue(options.strokeWidth, options.lineWidth), 1), '線の太さ');
+    const strokeColor = parseColor(ctx, getTemporaryStrokeColor(options));
+    const opacity = normalizeOpacity(options && options.opacity);
+    page.drawLine({
+      start: { x: line.x1, y: line.y1 },
+      end: { x: line.x2, y: line.y2 },
+      thickness: strokeWidth,
+      color: strokeColor,
+      opacity: opacity,
+    });
+    drawLineEndpointMarkers(page, line, {
+      strokeColor: strokeColor,
+      strokeWidth: strokeWidth,
+      opacity: opacity,
+      options: normalizeTemporaryObjectOptions('line', options),
+    });
+  }
+
+  function drawLineEndpointMarkers(page, line, style) {
+    const startMarker = normalizeLineMarker(style.options.startMarker);
+    const endMarker = normalizeLineMarker(style.options.endMarker);
+    if (startMarker === LINE_MARKER_DOT) {
+      drawLineDotMarker(page, { x: line.x1, y: line.y1 }, style);
+    } else if (startMarker === LINE_MARKER_ARROW) {
+      drawLineArrowMarker(page, { x: line.x1, y: line.y1 }, { x: line.x2, y: line.y2 }, style);
+    }
+    if (endMarker === LINE_MARKER_DOT) {
+      drawLineDotMarker(page, { x: line.x2, y: line.y2 }, style);
+    } else if (endMarker === LINE_MARKER_ARROW) {
+      drawLineArrowMarker(page, { x: line.x2, y: line.y2 }, { x: line.x1, y: line.y1 }, style);
+    }
+  }
+
+  function drawLineDotMarker(page, point, style) {
+    requireMethod(page, 'drawCircle');
+    page.drawCircle({
+      x: point.x,
+      y: point.y,
+      size: lineDotMarkerSize(style.strokeWidth),
+      color: style.strokeColor,
+      opacity: style.opacity,
+    });
+  }
+
+  function drawLineArrowMarker(page, tip, tail, style) {
+    getArrowMarkerSegments(tip, tail, style.strokeWidth).forEach(segment => {
+      page.drawLine({
+        start: segment,
+        end: { x: tip.x, y: tip.y },
+        thickness: style.strokeWidth,
+        color: style.strokeColor,
+        opacity: style.opacity,
+      });
+    });
+  }
+
+  function getArrowMarkerSegments(tip, tail, strokeWidth) {
+    const dx = Number(tip.x) - Number(tail.x);
+    const dy = Number(tip.y) - Number(tail.y);
+    const length = Math.sqrt(dx * dx + dy * dy);
+    if (!length) return [];
+    const unitX = dx / length;
+    const unitY = dy / length;
+    const headLength = Math.max(8, Number(strokeWidth || 1) * 4);
+    const headWidth = Math.max(4, Number(strokeWidth || 1) * 2);
+    const baseX = tip.x - unitX * headLength;
+    const baseY = tip.y - unitY * headLength;
+    const perpX = -unitY;
+    const perpY = unitX;
+    return [
+      { x: baseX + perpX * headWidth, y: baseY + perpY * headWidth },
+      { x: baseX - perpX * headWidth, y: baseY - perpY * headWidth },
+    ];
+  }
+
+  function lineDotMarkerSize(strokeWidth) {
+    return Math.max(3, Number(strokeWidth || 1));
+  }
+
+  function drawImageOnPage(page, image, rect, options) {
+    requireMethod(page, 'drawImage');
+    page.drawImage(image, {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      opacity: normalizeOpacity(options && options.opacity),
+    });
+  }
+
+  async function drawDateStampObject(ctx, tab, page, object) {
+    const text = formatDateStampText(object.data.text || todayIsoDate(), object.options.format);
+    const opacity = normalizeOpacity(defaultValue(object.options.opacity, 1));
+    const colorValue = object.options.color || '#000000';
+    if (containsNonAscii(text)) {
+      const imageBytes = createTextImageBytes(text, Math.max(10, object.rect.height * 0.65), colorValue);
+      const image = await tab.pdfDoc.embedPng(imageBytes);
+      drawImageOnPage(page, image, object.rect, { opacity: opacity });
+      return;
+    }
+    const font = await embedHelvetica(ctx, tab.pdfDoc);
+    requireMethod(page, 'drawText');
+    page.drawText(text, {
+      x: object.rect.x,
+      y: object.rect.y,
+      size: Math.max(8, object.rect.height * 0.7),
+      font: font,
+      color: parseColor(ctx, colorValue),
+      opacity: opacity,
+    });
+  }
+
+  async function drawFixedStampObject(ctx, tab, page, object) {
+    const text = object.data.preset || object.options.preset || '確認用';
+    const opacity = normalizeOpacity(defaultValue(object.options.opacity, 0.35));
+    const rotate = readFiniteNumber(defaultValue(object.options.rotate, -25), '回転角度');
+    const rotation = getRotation(ctx, rotate);
+    const colorValue = object.options.color || '#d32f2f';
+    if (containsNonAscii(text)) {
+      const imageBytes = createTextImageBytes(text, Math.max(12, object.rect.height * 0.58), colorValue);
+      const image = await tab.pdfDoc.embedPng(imageBytes);
+      requireMethod(page, 'drawImage');
+      page.drawImage(image, {
+        x: object.rect.x,
+        y: object.rect.y,
+        width: object.rect.width,
+        height: object.rect.height,
+        opacity: opacity,
+        rotate: rotation,
+      });
+      return;
+    }
+    const font = await embedHelvetica(ctx, tab.pdfDoc);
+    requireMethod(page, 'drawText');
+    page.drawText(text, {
+      x: object.rect.x,
+      y: object.rect.y,
+      size: Math.max(8, object.rect.height * 0.72),
+      font: font,
+      color: parseColor(ctx, colorValue),
+      opacity: opacity,
+      rotate: rotation,
+    });
+  }
+
+  function renderTemporaryObjects() {
+    const container = getPreviewContainer();
+    if (!container) return;
+    Array.from(container.querySelectorAll('.plugin-object')).forEach(element => {
+      if (typeof element.remove === 'function') element.remove();
+    });
+    activeTemporaryObjects().forEach(object => renderTemporaryObject(object, container));
+  }
+
+  function renderTemporaryObject(object, container) {
+    const pageElement = findPreviewPageElement(container, object.pageIndex);
+    if (!pageElement) return;
+    let layer = pageElement.querySelector('.plugin-edit-layer');
+    if (!layer) {
+      mountOrUpdateEditLayers();
+      layer = pageElement.querySelector('.plugin-edit-layer');
+    }
+    if (!layer) return;
+    const canvas = getPreviewCanvas(pageElement);
+    const canvasRect = canvas.getBoundingClientRect();
+    const lineRenderBox = object.type === 'line' ? getLineRenderBox(pageElement, object.line) : null;
+    const screenRect = lineRenderBox || pdfRectToScreenRect(pageElement, object.rect);
+    const objectElement = document.createElement('div');
+    objectElement.className = 'plugin-object'
+      + (isVectorTemporaryObject(object) ? ' plugin-vector-object' : '')
+      + (object.type === 'line' ? ' plugin-line-object' : '')
+      + (object.id === PluginObjectStore.selectedId ? ' selected' : '');
+    objectElement.dataset.objectId = object.id;
+    objectElement.style.left = roundCss(screenRect.left - canvasRect.left) + 'px';
+    objectElement.style.top = roundCss(screenRect.top - canvasRect.top) + 'px';
+    objectElement.style.width = roundCss(screenRect.width) + 'px';
+    objectElement.style.height = roundCss(screenRect.height) + 'px';
+    objectElement.addEventListener('pointerdown', event => startTemporaryDrag(event, object.id, 'move'));
+    objectElement.appendChild(createTemporaryPreviewContent(object, lineRenderBox));
+    if (object.type === 'line') {
+      appendLineEndpointHandles(objectElement, object, lineRenderBox);
+    } else {
+      ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach(handle => {
+        const handleElement = document.createElement('span');
+        handleElement.className = 'plugin-resize-handle';
+        handleElement.dataset.handle = handle;
+        handleElement.addEventListener('pointerdown', event => startTemporaryDrag(event, object.id, handle));
+        objectElement.appendChild(handleElement);
+      });
+    }
+    if (object.id === PluginObjectStore.selectedId) {
+      objectElement.appendChild(createEditToolbar(object.id));
+      const propertyPanel = createTemporaryPropertyPanel(object);
+      if (propertyPanel) objectElement.appendChild(propertyPanel);
+    }
+    layer.appendChild(objectElement);
+  }
+
+  function createTemporaryPreviewContent(object, lineRenderBox) {
+    if ((object.type === 'image' || object.type === 'qr') && object.data.previewUrl) {
+      const img = document.createElement('img');
+      img.src = object.data.previewUrl;
+      img.alt = object.type === 'qr' ? 'QRコード' : '画像';
+      img.style.opacity = String(normalizeOpacity(defaultValue(object.options.opacity, 1)));
+      return img;
+    }
+    if (isVectorTemporaryObject(object)) {
+      return createVectorPreviewContent(object, lineRenderBox);
+    }
+    const preview = document.createElement('div');
+    preview.className = 'plugin-object-preview';
+    preview.textContent = object.type === 'qr'
+      ? 'QR'
+      : object.type === 'date-stamp'
+        ? (object.data.text || todayIsoDate())
+        : (object.data.preset || '確認用');
+    if (object.options && object.options.rotate) {
+      preview.style.transform = 'rotate(' + Number(object.options.rotate) + 'deg)';
+    }
+    preview.style.opacity = String(normalizeOpacity(defaultValue(object.options.opacity, 1)));
+    return preview;
+  }
+
+  function createVectorPreviewContent(object, lineRenderBox) {
+    const svg = createSvgElement('svg');
+    svg.setAttribute('class', 'plugin-vector-preview');
+    try {
+      svg.className = 'plugin-vector-preview';
+    } catch (err) {
+      // SVG className is read-only in some browsers; the class attribute above is authoritative.
+    }
+    svg.setAttribute('viewBox', '0 0 100 100');
+    const strokeColor = getTemporaryStrokeColor(object.options);
+    const strokeWidth = Math.max(1, Number(defaultValue(object.options && defaultValue(object.options.strokeWidth, object.options.lineWidth), 1)));
+    const opacity = String(normalizeOpacity(defaultValue(object.options && object.options.opacity, 1)));
+
+    if (object.type === 'line') {
+      const line = createSvgElement('line');
+      const x1 = lineRenderBox ? lineRenderBox.localX1 : 0;
+      const y1 = lineRenderBox ? lineRenderBox.localY1 : 100;
+      const x2 = lineRenderBox ? lineRenderBox.localX2 : 100;
+      const y2 = lineRenderBox ? lineRenderBox.localY2 : 0;
+      const startPoint = { x: x1, y: y1 };
+      const endPoint = { x: x2, y: y2 };
+      line.setAttribute('x1', String(x1));
+      line.setAttribute('y1', String(y1));
+      line.setAttribute('x2', String(x2));
+      line.setAttribute('y2', String(y2));
+      line.setAttribute('stroke', strokeColor);
+      line.setAttribute('stroke-width', String(strokeWidth));
+      line.setAttribute('stroke-linecap', 'round');
+      line.setAttribute('opacity', opacity);
+      svg.setAttribute('viewBox', lineRenderBox ? '0 0 ' + lineRenderBox.width + ' ' + lineRenderBox.height : '0 0 100 100');
+      svg.appendChild(line);
+      const markerOptions = normalizeTemporaryObjectOptions('line', object.options);
+      appendLineMarkerPreview(svg, markerOptions.startMarker, startPoint, endPoint, strokeColor, strokeWidth, opacity);
+      appendLineMarkerPreview(svg, markerOptions.endMarker, endPoint, startPoint, strokeColor, strokeWidth, opacity);
+      return svg;
+    }
+
+    svg.setAttribute('preserveAspectRatio', 'none');
+    const shape = createSvgElement(object.type === 'ellipse' ? 'ellipse' : 'rect');
+    if (object.type === 'ellipse') {
+      shape.setAttribute('cx', '50');
+      shape.setAttribute('cy', '50');
+      shape.setAttribute('rx', '48');
+      shape.setAttribute('ry', '48');
+    } else {
+      shape.setAttribute('x', '2');
+      shape.setAttribute('y', '2');
+      shape.setAttribute('width', '96');
+      shape.setAttribute('height', '96');
+    }
+    shape.setAttribute('fill', getTemporaryFillColor(object.options, strokeColor) || 'none');
+    shape.setAttribute('stroke', strokeColor);
+    shape.setAttribute('stroke-width', String(Math.max(1, strokeWidth)));
+    shape.setAttribute('opacity', opacity);
+    svg.appendChild(shape);
+    return svg;
+  }
+
+  function createSvgElement(tagName) {
+    if (typeof document !== 'undefined' && typeof document.createElementNS === 'function') {
+      return document.createElementNS(SVG_NAMESPACE, tagName);
+    }
+    return document.createElement(tagName);
+  }
+
+  function appendLineMarkerPreview(svg, marker, tip, tail, strokeColor, strokeWidth, opacity) {
+    const normalizedMarker = normalizeLineMarker(marker);
+    if (normalizedMarker === LINE_MARKER_DOT) {
+      const circle = createSvgElement('circle');
+      circle.setAttribute('cx', String(tip.x));
+      circle.setAttribute('cy', String(tip.y));
+      circle.setAttribute('r', String(lineDotMarkerSize(strokeWidth)));
+      circle.setAttribute('fill', strokeColor);
+      circle.setAttribute('opacity', opacity);
+      svg.appendChild(circle);
+      return;
+    }
+    if (normalizedMarker !== LINE_MARKER_ARROW) return;
+    const points = getArrowMarkerSegments(tip, tail, strokeWidth);
+    if (points.length !== 2) return;
+    const arrow = createSvgElement('polyline');
+    arrow.setAttribute(
+      'points',
+      points[0].x + ',' + points[0].y + ' ' + tip.x + ',' + tip.y + ' ' + points[1].x + ',' + points[1].y
+    );
+    arrow.setAttribute('fill', 'none');
+    arrow.setAttribute('stroke', strokeColor);
+    arrow.setAttribute('stroke-width', String(Math.max(1, Number(strokeWidth || 1))));
+    arrow.setAttribute('stroke-linecap', 'round');
+    arrow.setAttribute('stroke-linejoin', 'round');
+    arrow.setAttribute('opacity', opacity);
+    svg.appendChild(arrow);
+  }
+
+  function appendLineEndpointHandles(objectElement, object, lineRenderBox) {
+    if (!lineRenderBox) return;
+    [
+      ['start', lineRenderBox.localX1, lineRenderBox.localY1],
+      ['end', lineRenderBox.localX2, lineRenderBox.localY2],
+    ].forEach(item => {
+      const handleElement = document.createElement('span');
+      handleElement.className = 'plugin-resize-handle plugin-line-endpoint-handle';
+      handleElement.dataset.handle = item[0];
+      handleElement.style.left = roundCss(item[1]) + 'px';
+      handleElement.style.top = roundCss(item[2]) + 'px';
+      handleElement.addEventListener('pointerdown', event => startTemporaryDrag(event, object.id, item[0]));
+      objectElement.appendChild(handleElement);
+    });
+  }
+
+  function createTemporaryPropertyPanel(object) {
+    if (!isVectorTemporaryObject(object)) return null;
+    const panel = document.createElement('div');
+    panel.className = 'plugin-property-panel';
+    panel.addEventListener('pointerdown', event => {
+      if (event.stopPropagation) event.stopPropagation();
+    });
+    panel.appendChild(propertyInput('線', 'color', getTemporaryStrokeColor(object.options), value => {
+      updateTemporaryObjectOptions(object.id, { strokeColor: value, color: value });
+    }));
+    panel.appendChild(propertyInput('太さ', 'number', defaultValue(object.options && defaultValue(object.options.strokeWidth, object.options.lineWidth), 1), value => {
+      updateTemporaryObjectOptions(object.id, { strokeWidth: readNonNegativeNumber(value, '線の太さ'), lineWidth: readNonNegativeNumber(value, '線の太さ') });
+    }));
+    panel.appendChild(propertyInput('透明度', 'number', defaultValue(object.options && object.options.opacity, 1), value => {
+      updateTemporaryObjectOptions(object.id, { opacity: normalizeOpacity(value) });
+    }, { min: '0', max: '1', step: '0.1' }));
+    if (object.type === 'line') {
+      panel.appendChild(lineMarkerSelect('始点', normalizeLineMarker(object.options && object.options.startMarker), value => {
+        updateTemporaryObjectOptions(object.id, { startMarker: value });
+      }));
+      panel.appendChild(lineMarkerSelect('終点', normalizeLineMarker(object.options && object.options.endMarker), value => {
+        updateTemporaryObjectOptions(object.id, { endMarker: value });
+      }));
+    }
+    if (object.type === 'rect' || object.type === 'ellipse') {
+      const fillLabel = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = !!getTemporaryFillColor(object.options, getTemporaryStrokeColor(object.options));
+      checkbox.addEventListener('change', () => {
+        updateTemporaryObjectOptions(object.id, { fillColor: checkbox.checked ? getTemporaryStrokeColor(object.options) : null });
+      });
+      fillLabel.appendChild(checkbox);
+      appendText(fillLabel, '塗り');
+      panel.appendChild(fillLabel);
+      panel.appendChild(propertyInput('塗色', 'color', getTemporaryFillColor(object.options, getTemporaryStrokeColor(object.options)) || getTemporaryStrokeColor(object.options), value => {
+        updateTemporaryObjectOptions(object.id, { fillColor: value });
+      }));
+    }
+    return panel;
+  }
+
+  function lineMarkerSelect(labelText, value, onChange) {
+    return propertySelect(labelText, normalizeLineMarker(value), [
+      [LINE_MARKER_NONE, 'なし'],
+      [LINE_MARKER_DOT, '●'],
+      [LINE_MARKER_ARROW, '→'],
+    ], value => onChange(normalizeLineMarker(value)));
+  }
+
+  function propertyInput(labelText, type, value, onChange, attrs) {
+    const label = document.createElement('label');
+    appendText(label, labelText);
+    const input = document.createElement('input');
+    input.type = type;
+    input.value = String(value);
+    Object.keys(attrs || {}).forEach(key => {
+      input.setAttribute(key, attrs[key]);
+    });
+    input.addEventListener('change', () => {
+      try {
+        onChange(input.value);
+      } catch (err) {
+        showToast(PluginObjectStore.ctx, err && err.message ? err.message : '入力値を確認してください。', 'warning');
+      }
+    });
+    label.appendChild(input);
+    return label;
+  }
+
+  function propertySelect(labelText, value, options, onChange) {
+    const label = document.createElement('label');
+    appendText(label, labelText);
+    const select = document.createElement('select');
+    select.value = String(value);
+    options.forEach(option => {
+      const optionElement = document.createElement('option');
+      optionElement.value = option[0];
+      optionElement.textContent = option[1];
+      if (option[0] === value) optionElement.selected = true;
+      select.appendChild(optionElement);
+    });
+    select.addEventListener('change', () => {
+      onChange(select.value);
+    });
+    label.appendChild(select);
+    return label;
+  }
+
+  function appendText(parent, text) {
+    if (typeof document !== 'undefined' && typeof document.createTextNode === 'function') {
+      parent.appendChild(document.createTextNode(text));
+      return;
+    }
+    const span = document.createElement('span');
+    span.textContent = text;
+    parent.appendChild(span);
+  }
+
+  function createEditToolbar(id) {
+    const toolbar = document.createElement('div');
+    toolbar.className = 'plugin-edit-toolbar';
+    ['pointerdown', 'mousedown', 'touchstart'].forEach(type => {
+      toolbar.addEventListener(type, event => {
+        if (event.stopPropagation) event.stopPropagation();
+      });
+    });
+    toolbar.appendChild(toolbarButton('適用', 'primary', () => applyTemporaryObject(PluginObjectStore.ctx, id)));
+    toolbar.appendChild(toolbarButton('キャンセル', '', () => cancelTemporaryObject(id)));
+    toolbar.appendChild(toolbarButton('削除', '', () => deleteTemporaryObject(id)));
+    return toolbar;
+  }
+
+  function toolbarButton(label, className, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    if (className) button.className = className;
+    button.addEventListener('click', event => {
+      if (event.stopPropagation) event.stopPropagation();
+      try {
+        const result = action();
+        if (result && typeof result.catch === 'function') {
+          return result.catch(err => {
+            showToast(PluginObjectStore.ctx, err && err.message ? err.message : '処理できませんでした。', 'warning');
+            return false;
+          });
+        }
+        return result;
+      } catch (err) {
+        showToast(PluginObjectStore.ctx, err && err.message ? err.message : '処理できませんでした。', 'warning');
+        return false;
+      }
+    });
+    return button;
+  }
+
+  function startTemporaryDrag(event, id, mode) {
+    if (event.stopPropagation) event.stopPropagation();
+    if (event.preventDefault) event.preventDefault();
+    const object = findTemporaryObject(id);
+    if (!object) return;
+    PluginObjectStore.selectedId = id;
+    PluginObjectStore.drag = {
+      id: id,
+      mode: mode,
+      startX: Number(event.clientX || 0),
+      startY: Number(event.clientY || 0),
+      startRect: Object.assign({}, object.rect),
+      startLine: object.line ? Object.assign({}, object.line) : null,
+    };
+    if (event.currentTarget && typeof event.currentTarget.setPointerCapture === 'function') {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('pointermove', handleTemporaryPointerMove);
+      document.addEventListener('pointerup', stopTemporaryDrag);
+      document.addEventListener('pointercancel', stopTemporaryDrag);
+    }
+    renderTemporaryObjects();
+  }
+
+  function handleTemporaryPointerMove(event) {
+    const drag = PluginObjectStore.drag;
+    const object = drag ? findTemporaryObject(drag.id) : null;
+    if (!drag || !object) return;
+    const container = getPreviewContainer();
+    const pageElement = container ? findPreviewPageElement(container, object.pageIndex) : null;
+    const canvas = pageElement ? getPreviewCanvas(pageElement) : null;
+    const viewport = getPageViewportInfo(object.pageIndex);
+    if (!canvas || !viewport) return;
+    const canvasRect = canvas.getBoundingClientRect();
+    const dx = (Number(event.clientX || 0) - drag.startX) * viewport.width / canvasRect.width;
+    const dy = -(Number(event.clientY || 0) - drag.startY) * viewport.height / canvasRect.height;
+    if (object.type === 'line') {
+      if (drag.mode === 'move') {
+        object.line = translatePdfLine(drag.startLine || object.line, dx, dy, viewport);
+      } else if (drag.mode === 'start' || drag.mode === 'end') {
+        object.line = moveLineEndpointFromDrag(drag.startLine || object.line, drag.mode, dx, dy, viewport, event.shiftKey);
+      }
+      object.rect = lineToPdfRect(object.line, viewport);
+      renderTemporaryObjects();
+      return;
+    }
+    if (drag.mode === 'move') {
+      object.rect = normalizePdfRect({
+        x: drag.startRect.x + dx,
+        y: drag.startRect.y + dy,
+        width: drag.startRect.width,
+        height: drag.startRect.height,
+      }, viewport);
+    } else {
+      object.rect = resizeFromHandle(object, drag.startRect, drag.mode, dx, dy, viewport, event.shiftKey);
+    }
+    renderTemporaryObjects();
+  }
+
+  function stopTemporaryDrag() {
+    PluginObjectStore.drag = null;
+    if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+      document.removeEventListener('pointermove', handleTemporaryPointerMove);
+      document.removeEventListener('pointerup', stopTemporaryDrag);
+      document.removeEventListener('pointercancel', stopTemporaryDrag);
+    }
+  }
+
+  function resizeFromHandle(object, startRect, handle, dx, dy, viewport, forceAspect) {
+    let x = startRect.x;
+    let y = startRect.y;
+    let width = startRect.width;
+    let height = startRect.height;
+    if (handle.indexOf('e') >= 0) width += dx;
+    if (handle.indexOf('w') >= 0) {
+      x += dx;
+      width -= dx;
+    }
+    if (handle.indexOf('n') >= 0) height += dy;
+    if (handle.indexOf('s') >= 0) {
+      y += dy;
+      height -= dy;
+    }
+    if (forceAspect || shouldKeepTemporaryAspect(object)) {
+      const size = Math.max(MIN_TEMP_OBJECT_PT, Math.max(width, height));
+      width = size;
+      height = object.type === 'qr' ? size : size * (startRect.height / Math.max(startRect.width, 1));
+      if (handle.indexOf('w') >= 0) x = startRect.x + startRect.width - width;
+      if (handle.indexOf('s') >= 0) y = startRect.y + startRect.height - height;
+    }
+    return normalizePdfRect({ x: x, y: y, width: width, height: height }, viewport);
+  }
+
+  function findPreviewPageElement(container, pageIndex) {
+    return Array.from(container.querySelectorAll('.preview-page'))
+      .find(element => Number(element.dataset && element.dataset.pageIndex) === Number(pageIndex));
+  }
+
+  function findTemporaryObject(id) {
+    return PluginObjectStore.objects.find(object => object.id === id) || null;
+  }
+
+  function resolveTemporaryPageIndex(tab, pageIndex) {
+    const numeric = Number(pageIndex);
+    if (Number.isInteger(numeric) && numeric >= 0 && numeric < tab.pageCount) return numeric;
+    if (Array.isArray(tab.selectedPages) && tab.selectedPages.length > 0) {
+      const selected = Number(tab.selectedPages[0]);
+      if (Number.isInteger(selected) && selected >= 0 && selected < tab.pageCount) return selected;
+    }
+    return 0;
+  }
+
+  function defaultTemporaryRect(viewport, spec) {
+    const width = readPositiveNumber(defaultValue(spec && spec.width, viewport.width * 0.28), '幅');
+    const height = readPositiveNumber(defaultValue(spec && spec.height, viewport.height * 0.12), '高さ');
+    return {
+      x: (viewport.width - width) / 2,
+      y: (viewport.height - height) / 2,
+      width: width,
+      height: height,
+    };
+  }
+
+  function defaultTemporaryLine(viewport, spec) {
+    const width = readNonNegativeNumber(defaultValue(spec && spec.width, viewport.width * 0.28), '幅');
+    const height = readNonNegativeNumber(defaultValue(spec && spec.height, 0), '高さ');
+    return centeredTemporaryLine(viewport, width, height);
+  }
+
+  function centeredTemporaryLine(viewport, width, height) {
+    const x1 = (viewport.width - width) / 2;
+    const y1 = (viewport.height - height) / 2;
+    return {
+      x1: x1,
+      y1: y1,
+      x2: x1 + width,
+      y2: y1 + height,
+    };
+  }
+
+  function normalizeTemporaryObjectType(value) {
+    const type = String(value || 'image');
+    if (type === 'qr') return 'qr';
+    if (type === 'date' || type === 'date-stamp') return 'date-stamp';
+    if (type === 'stamp' || type === 'fixed-stamp') return 'stamp';
+    if (type === 'rect' || type === 'rectangle' || type === '四角') return 'rect';
+    if (type === 'ellipse' || type === 'circle' || type === '丸') return 'ellipse';
+    if (type === 'line' || type === '線') return 'line';
+    return 'image';
+  }
+
+  function normalizePdfRect(rect, viewport) {
+    const pageWidth = viewport ? viewport.width : Number.POSITIVE_INFINITY;
+    const pageHeight = viewport ? viewport.height : Number.POSITIVE_INFINITY;
+    const width = Math.max(MIN_TEMP_OBJECT_PT, Math.min(readPositiveNumber(defaultValue(rect.width, MIN_TEMP_OBJECT_PT), '幅'), pageWidth));
+    const height = Math.max(MIN_TEMP_OBJECT_PT, Math.min(readPositiveNumber(defaultValue(rect.height, MIN_TEMP_OBJECT_PT), '高さ'), pageHeight));
+    return {
+      x: clamp(readFiniteNumber(defaultValue(rect.x, 0), 'x座標'), 0, Math.max(0, pageWidth - width)),
+      y: clamp(readFiniteNumber(defaultValue(rect.y, 0), 'y座標'), 0, Math.max(0, pageHeight - height)),
+      width: width,
+      height: height,
+    };
+  }
+
+  function normalizePdfLine(line, viewport) {
+    const pageWidth = viewport ? viewport.width : Number.POSITIVE_INFINITY;
+    const pageHeight = viewport ? viewport.height : Number.POSITIVE_INFINITY;
+    return {
+      x1: clamp(readFiniteNumber(defaultValue(line.x1, 0), '始点x座標'), 0, pageWidth),
+      y1: clamp(readFiniteNumber(defaultValue(line.y1, 0), '始点y座標'), 0, pageHeight),
+      x2: clamp(readFiniteNumber(defaultValue(line.x2, 0), '終点x座標'), 0, pageWidth),
+      y2: clamp(readFiniteNumber(defaultValue(line.y2, 0), '終点y座標'), 0, pageHeight),
+    };
+  }
+
+  function normalizePdfPoint(point, viewport) {
+    const pageWidth = viewport ? viewport.width : Number.POSITIVE_INFINITY;
+    const pageHeight = viewport ? viewport.height : Number.POSITIVE_INFINITY;
+    return {
+      x: clamp(readFiniteNumber(defaultValue(point.x, 0), 'x座標'), 0, pageWidth),
+      y: clamp(readFiniteNumber(defaultValue(point.y, 0), 'y座標'), 0, pageHeight),
+    };
+  }
+
+  function lineSpecFromRectOrLine(nextRect, currentLine) {
+    if (nextRect.x1 !== undefined || nextRect.y1 !== undefined || nextRect.x2 !== undefined || nextRect.y2 !== undefined) {
+      return {
+        x1: defaultValue(nextRect.x1, currentLine.x1),
+        y1: defaultValue(nextRect.y1, currentLine.y1),
+        x2: defaultValue(nextRect.x2, currentLine.x2),
+        y2: defaultValue(nextRect.y2, currentLine.y2),
+      };
+    }
+    const x = defaultValue(nextRect.x, Math.min(currentLine.x1, currentLine.x2));
+    const y = defaultValue(nextRect.y, Math.min(currentLine.y1, currentLine.y2));
+    const width = defaultValue(nextRect.width, Math.abs(currentLine.x2 - currentLine.x1));
+    const height = defaultValue(nextRect.height, Math.abs(currentLine.y2 - currentLine.y1));
+    return {
+      x1: x,
+      y1: y,
+      x2: Number(x) + Number(width),
+      y2: Number(y) + Number(height),
+    };
+  }
+
+  function lineToPdfRect(line, viewport) {
+    const bounds = getLineBounds(line);
+    return normalizePdfRect({
+      x: bounds.x,
+      y: bounds.y,
+      width: Math.max(MIN_TEMP_OBJECT_PT, bounds.width),
+      height: Math.max(MIN_TEMP_OBJECT_PT, bounds.height),
+    }, viewport);
+  }
+
+  function getLineBounds(line) {
+    const minX = Math.min(line.x1, line.x2);
+    const minY = Math.min(line.y1, line.y2);
+    const maxX = Math.max(line.x1, line.x2);
+    const maxY = Math.max(line.y1, line.y2);
+    return {
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+      maxX: maxX,
+      maxY: maxY,
+    };
+  }
+
+  function translatePdfLine(line, dx, dy, viewport) {
+    const bounds = getLineBounds(line);
+    const pageWidth = viewport ? viewport.width : Number.POSITIVE_INFINITY;
+    const pageHeight = viewport ? viewport.height : Number.POSITIVE_INFINITY;
+    const clampedDx = clamp(Number(dx || 0), -bounds.x, pageWidth - bounds.maxX);
+    const clampedDy = clamp(Number(dy || 0), -bounds.y, pageHeight - bounds.maxY);
+    return normalizePdfLine({
+      x1: line.x1 + clampedDx,
+      y1: line.y1 + clampedDy,
+      x2: line.x2 + clampedDx,
+      y2: line.y2 + clampedDy,
+    }, viewport);
+  }
+
+  function moveLineEndpointFromDrag(startLine, endpoint, dx, dy, viewport, snap) {
+    const line = Object.assign({}, startLine);
+    const isStart = endpoint === 'start';
+    const moving = isStart
+      ? { x: startLine.x1 + dx, y: startLine.y1 + dy }
+      : { x: startLine.x2 + dx, y: startLine.y2 + dy };
+    const anchor = isStart
+      ? { x: startLine.x2, y: startLine.y2 }
+      : { x: startLine.x1, y: startLine.y1 };
+    const point = normalizePdfPoint(snap ? snapLinePoint(anchor, moving) : moving, viewport);
+    if (isStart) {
+      line.x1 = point.x;
+      line.y1 = point.y;
+    } else {
+      line.x2 = point.x;
+      line.y2 = point.y;
+    }
+    return normalizePdfLine(line, viewport);
+  }
+
+  function snapLinePoint(anchor, point) {
+    const dx = Number(point.x) - Number(anchor.x);
+    const dy = Number(point.y) - Number(anchor.y);
+    const length = Math.sqrt(dx * dx + dy * dy);
+    if (!length) return { x: point.x, y: point.y };
+    const angle = Math.atan2(dy, dx);
+    const snappedAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+    return {
+      x: anchor.x + Math.cos(snappedAngle) * length,
+      y: anchor.y + Math.sin(snappedAngle) * length,
+    };
+  }
+
+  function enforceTemporarySize(object, nextRect) {
+    const width = readPositiveNumber(defaultValue(nextRect.width, object.rect.width), '幅');
+    const height = readPositiveNumber(defaultValue(nextRect.height, object.rect.height), '高さ');
+    if (shouldKeepTemporaryAspect(object)) {
+      const ratio = object.type === 'qr' ? 1 : object.rect.height / Math.max(object.rect.width, 1);
+      return { width: width, height: width * ratio };
+    }
+    return { width: width, height: height };
+  }
+
+  function shouldKeepTemporaryAspect(object) {
+    return object.type === 'qr' || (object.options && object.options.keepAspect === true);
+  }
+
+  function isVectorTemporaryObject(object) {
+    return object && (object.type === 'rect' || object.type === 'ellipse' || object.type === 'line');
+  }
+
+  function normalizeTemporaryObjectOptions(type, options) {
+    const normalized = Object.assign({}, options || {});
+    if (type === 'line') {
+      normalized.startMarker = normalizeLineMarker(normalized.startMarker);
+      normalized.endMarker = normalizeLineMarker(normalized.endMarker);
+    }
+    return normalized;
+  }
+
+  function normalizeLineMarker(value) {
+    const marker = String(defaultValue(value, LINE_MARKER_NONE)).toLowerCase();
+    if (marker === LINE_MARKER_DOT || marker === 'circle' || marker === '丸' || marker === '●') return LINE_MARKER_DOT;
+    if (marker === LINE_MARKER_ARROW || marker === 'arrowhead' || marker === '矢印' || marker === '→') return LINE_MARKER_ARROW;
+    return LINE_MARKER_NONE;
+  }
+
+  function getTemporaryStrokeColor(options) {
+    return String(defaultValue(options && defaultValue(options.strokeColor, options.color), '#d32f2f'));
+  }
+
+  function getTemporaryFillColor(options, strokeColorValue) {
+    if (!options) return null;
+    if (options.fillColor === null || options.fillColor === '' || options.fillColor === 'none') return null;
+    if (options.fillColor !== undefined) return String(options.fillColor);
+    if (options.fill === true) return strokeColorValue || getTemporaryStrokeColor(options);
+    return null;
+  }
+
+  function getLineRenderBox(pageElement, line) {
+    const start = pdfPointToScreenPoint(pageElement, { x: line.x1, y: line.y1 });
+    const end = pdfPointToScreenPoint(pageElement, { x: line.x2, y: line.y2 });
+    const padding = 8;
+    const left = Math.min(start.x, end.x) - padding;
+    const top = Math.min(start.y, end.y) - padding;
+    const right = Math.max(start.x, end.x) + padding;
+    const bottom = Math.max(start.y, end.y) + padding;
+    const width = Math.max(16, right - left);
+    const height = Math.max(16, bottom - top);
+    return {
+      left: left,
+      top: top,
+      right: left + width,
+      bottom: top + height,
+      width: width,
+      height: height,
+      localX1: start.x - left,
+      localY1: start.y - top,
+      localX2: end.x - left,
+      localY2: end.y - top,
+    };
+  }
+
+  function pdfPointToScreenPoint(pageElement, point) {
+    const canvas = getPreviewCanvas(pageElement);
+    const pageIndex = readPageElementIndex(pageElement);
+    const viewport = getPageViewportInfo(pageIndex);
+    if (!canvas || !viewport) throw new Error('プレビュー座標を取得できません。');
+    const canvasRect = canvas.getBoundingClientRect();
+    return {
+      x: canvasRect.left + Number(point.x) * canvasRect.width / viewport.width,
+      y: canvasRect.top + (viewport.height - Number(point.y)) * canvasRect.height / viewport.height,
+    };
+  }
+
+  function cloneTemporaryObject(object) {
+    const clone = {
+      id: object.id,
+      tabId: object.tabId,
+      type: object.type,
+      pageIndex: object.pageIndex,
+      rect: Object.assign({}, object.rect),
+      data: Object.assign({}, object.data),
+      options: Object.assign({}, object.options),
+    };
+    if (object.line) clone.line = Object.assign({}, object.line);
+    return clone;
+  }
+
+  function roundCss(value) {
+    return String(Math.round(Number(value) * 1000) / 1000);
+  }
+
+  async function rotateSelectedPages(ctx, deltaDegrees) {
+    return commitSelectedPages(ctx, 'ページ回転', refs => {
+      refs.forEach(ref => {
+        const current = getPageRotationAngle(ref.page);
+        ref.page.setRotation(ctx.PDFLib.degrees(normalizeAngle(current + deltaDegrees)));
+      });
+    }, '選択ページを回転しました。');
+  }
+
+  async function applyCrop(ctx, marginsMm) {
+    const margins = marginsToPoints(marginsMm);
+    return commitSelectedPages(ctx, 'トリミング', refs => {
+      const boxes = refs.map(ref => getCropBox(ref.page, margins));
+      refs.forEach((ref, index) => {
+        requireMethod(ref.page, 'setCropBox');
+        const box = boxes[index];
+        ref.page.setCropBox(box.x, box.y, box.width, box.height);
+      });
+    }, '選択ページの表示範囲を変更しました。');
+  }
+
+  async function applyMargins(ctx, marginsMm) {
+    const margins = marginsToPoints(marginsMm);
+    return commitSelectedPages(ctx, '余白追加', refs => {
+      refs.forEach(ref => {
+        requireMethod(ref.page, 'setSize');
+        requireMethod(ref.page, 'translateContent');
+        const size = ref.page.getSize();
+        const nextWidth = size.width + margins.left + margins.right;
+        const nextHeight = size.height + margins.top + margins.bottom;
+        ref.page.setSize(nextWidth, nextHeight);
+        ref.page.translateContent(margins.left, margins.bottom);
+        setVisiblePageBox(ref.page, nextWidth, nextHeight);
+      });
+    }, '選択ページに余白を追加しました。');
+  }
+
+  async function applyPageSize(ctx, options) {
+    const targetSize = resolveTargetSize(options);
+    return commitSelectedPages(ctx, 'ページサイズ変更', refs => {
+      const plans = refs.map(ref => getResizePlan(ref.page, targetSize, options.fitContent));
+      refs.forEach((ref, index) => applyResizePlan(ref.page, plans[index]));
+    }, '選択ページのサイズを変更しました。');
+  }
+
+  async function applyContentShrink(ctx, options) {
+    const scale = normalizeScalePercent(options.percent);
+    return commitSelectedPages(ctx, '内容縮小', refs => {
+      refs.forEach(ref => {
+        requireMethod(ref.page, 'scaleContent');
+        ref.page.scaleContent(scale, scale);
+        if (options.center !== false) {
+          requireMethod(ref.page, 'translateContent');
+          const size = ref.page.getSize();
+          ref.page.translateContent(size.width * (1 - scale) / 2, size.height * (1 - scale) / 2);
+        }
+      });
+    }, '選択ページの内容を縮小しました。');
+  }
+
+  async function applyShape(ctx, options) {
+    const kind = normalizeShapeKind(options && (options.kind || options.shape || options.type));
+    return commitTargetPages(ctx, 'insert-tools', '図形挿入', getTarget(options), refs => {
+      const placement = getPlacementPoints(options, kind === 'line');
+      const lineWidth = readNonNegativeNumber(defaultValue(options && options.lineWidth, 1), '線の太さ');
+      const opacity = normalizeOpacity(options && options.opacity);
+      const color = parseColor(ctx, options && options.color ? options.color : '#d32f2f');
+
+      refs.forEach(ref => {
+        if (kind === 'line') {
+          drawLineObjectOnPage(ctx, ref.page, {
+            x1: placement.x,
+            y1: placement.y,
+            x2: placement.x + placement.width,
+            y2: placement.y + placement.height,
+          }, Object.assign({}, options || {}, {
+            lineWidth: lineWidth,
+            color: options && options.color ? options.color : '#d32f2f',
+            opacity: opacity,
+          }));
+          return;
+        }
+
+        if (kind === 'ellipse') {
+          requireMethod(ref.page, 'drawEllipse');
+          ref.page.drawEllipse({
+            x: placement.x + placement.width / 2,
+            y: placement.y + placement.height / 2,
+            xScale: placement.width / 2,
+            yScale: placement.height / 2,
+            borderWidth: lineWidth,
+            borderColor: color,
+            borderOpacity: opacity,
+            color: options && options.fill ? color : undefined,
+            opacity: opacity,
+          });
+          return;
+        }
+
+        requireMethod(ref.page, 'drawRectangle');
+        ref.page.drawRectangle({
+          x: placement.x,
+          y: placement.y,
+          width: placement.width,
+          height: placement.height,
+          borderWidth: lineWidth,
+          borderColor: color,
+          borderOpacity: opacity,
+          color: options && options.fill ? color : undefined,
+          opacity: opacity,
+        });
+      });
+    }, '図形を挿入しました。');
+  }
+
+  async function applyImage(ctx, options) {
+    return applyRasterImage(ctx, options, '画像挿入', '画像を挿入しました。');
+  }
+
+  async function applyQrImage(ctx, options) {
+    const text = String(options ? defaultValue(options.text, defaultValue(options.value, '')) : '').trim();
+    if (!text) {
+      throw new Error('QRコードにするURLまたは文字列を入力してください。');
+    }
+    const size = readPositiveNumber(defaultValue(options && options.size, defaultValue(options && options.width, 35)), 'サイズ');
+    return applyRasterImage(ctx, {
+      target: getTarget(options),
+      bytes: generateQrPngBytes(text, { includeBackground: !options || options.includeBackground !== false }),
+      mimeType: 'image/png',
+      filename: 'qrcode.png',
+      x: options && options.x,
+      y: options && options.y,
+      width: size,
+      height: size,
+      keepAspect: false,
+      opacity: options && options.opacity,
+    }, 'QRコード挿入', 'QRコードを挿入しました。');
+  }
+
+  async function applyRasterImage(ctx, options, actionName, successMessage) {
+    return commitTargetPages(ctx, 'insert-tools', actionName, getTarget(options), async (refs, tab) => {
+      const bytes = normalizeImageBytes(options && (options.bytes || options.imageBytes || options.data));
+      if (bytes.byteLength > MAX_IMAGE_BYTES) {
+        throw new Error('画像サイズが大きすぎます。10MB以下の画像を選択してください。');
+      }
+
+      const image = await embedRasterImage(tab.pdfDoc, bytes, options && options.mimeType, options && options.filename);
+      const placement = getPlacementPoints(options, false);
+      const drawSize = getImageDrawSize(image, placement, !options || options.keepAspect !== false);
+      const opacity = normalizeOpacity(options && options.opacity);
+
+      refs.forEach(ref => {
+        requireMethod(ref.page, 'drawImage');
+        ref.page.drawImage(image, {
+          x: placement.x,
+          y: placement.y,
+          width: drawSize.width,
+          height: drawSize.height,
+          opacity: opacity,
+        });
+      });
+    }, successMessage);
+  }
+
+  const QR_SPECS = [
+    { version: 1, size: 21, dataCodewords: 19, eccCodewords: 7, alignment: [] },
+    { version: 2, size: 25, dataCodewords: 34, eccCodewords: 10, alignment: [6, 18] },
+    { version: 3, size: 29, dataCodewords: 55, eccCodewords: 15, alignment: [6, 22] },
+    { version: 4, size: 33, dataCodewords: 80, eccCodewords: 20, alignment: [6, 26] },
+    { version: 5, size: 37, dataCodewords: 108, eccCodewords: 26, alignment: [6, 30] },
+  ];
+
+  function generateQrPngBytes(text, options) {
+    const matrix = generateQrMatrix(String(text || ''));
+    return renderQrMatrixToPng(matrix, options || {});
+  }
+
+  function generateQrMatrix(text) {
+    const data = textToUtf8Bytes(text);
+    const spec = QR_SPECS.find(item => data.length <= qrByteCapacity(item));
+    if (!spec) {
+      throw new Error('QRコードにする文字列が長すぎます。108バイト以内で入力してください。');
+    }
+
+    const dataCodewords = makeQrDataCodewords(data, spec.dataCodewords);
+    const ecc = reedSolomonRemainder(dataCodewords, spec.eccCodewords);
+    const codewords = dataCodewords.concat(ecc);
+    const base = createQrBaseMatrix(spec);
+    placeQrData(base.modules, base.reserved, codewords);
+
+    let bestMatrix = null;
+    let bestPenalty = Infinity;
+    for (let mask = 0; mask < 8; mask += 1) {
+      const masked = cloneMatrix(base.modules);
+      applyQrMask(masked, base.reserved, mask);
+      placeQrFormatBits(masked, mask);
+      const penalty = scoreQrMatrix(masked);
+      if (penalty < bestPenalty) {
+        bestPenalty = penalty;
+        bestMatrix = masked;
+      }
+    }
+    return bestMatrix;
+  }
+
+  function qrByteCapacity(spec) {
+    return spec.dataCodewords - 2;
+  }
+
+  function makeQrDataCodewords(data, dataCodewordCount) {
+    const bits = [];
+    pushBits(bits, 0x4, 4);
+    pushBits(bits, data.length, 8);
+    data.forEach(byte => pushBits(bits, byte, 8));
+
+    const capacity = dataCodewordCount * 8;
+    pushBits(bits, 0, Math.min(4, capacity - bits.length));
+    while (bits.length % 8 !== 0) bits.push(0);
+
+    const codewords = [];
+    for (let i = 0; i < bits.length; i += 8) {
+      let value = 0;
+      for (let bit = 0; bit < 8; bit += 1) value = (value << 1) | bits[i + bit];
+      codewords.push(value);
+    }
+
+    const pads = [0xec, 0x11];
+    let padIndex = 0;
+    while (codewords.length < dataCodewordCount) {
+      codewords.push(pads[padIndex % 2]);
+      padIndex += 1;
+    }
+    return codewords;
+  }
+
+  function pushBits(bits, value, length) {
+    for (let i = length - 1; i >= 0; i -= 1) bits.push((value >>> i) & 1);
+  }
+
+  function createQrBaseMatrix(spec) {
+    const modules = Array.from({ length: spec.size }, () => Array(spec.size).fill(false));
+    const reserved = Array.from({ length: spec.size }, () => Array(spec.size).fill(false));
+    drawFinder(modules, reserved, 0, 0);
+    drawFinder(modules, reserved, spec.size - 7, 0);
+    drawFinder(modules, reserved, 0, spec.size - 7);
+    drawTiming(modules, reserved);
+    drawAlignment(modules, reserved, spec.alignment);
+    setQrFunctionModule(modules, reserved, 4 * spec.version + 9, 8, true);
+    reserveFormatModules(modules, reserved);
+    return { modules, reserved };
+  }
+
+  function drawFinder(modules, reserved, x, y) {
+    for (let dy = -1; dy <= 7; dy += 1) {
+      for (let dx = -1; dx <= 7; dx += 1) {
+        const row = y + dy;
+        const col = x + dx;
+        if (!isInMatrix(modules, row, col)) continue;
+        const isPattern = dx >= 0 && dx <= 6 && dy >= 0 && dy <= 6
+          && (dx === 0 || dx === 6 || dy === 0 || dy === 6 || (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4));
+        setQrFunctionModule(modules, reserved, row, col, isPattern);
+      }
+    }
+  }
+
+  function drawTiming(modules, reserved) {
+    const size = modules.length;
+    for (let i = 8; i < size - 8; i += 1) {
+      setQrFunctionModule(modules, reserved, 6, i, i % 2 === 0);
+      setQrFunctionModule(modules, reserved, i, 6, i % 2 === 0);
+    }
+  }
+
+  function drawAlignment(modules, reserved, positions) {
+    if (!positions.length) return;
+    positions.forEach(row => {
+      positions.forEach(col => {
+        if (reserved[row][col]) return;
+        for (let dy = -2; dy <= 2; dy += 1) {
+          for (let dx = -2; dx <= 2; dx += 1) {
+            setQrFunctionModule(modules, reserved, row + dy, col + dx, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+          }
+        }
+      });
+    });
+  }
+
+  function reserveFormatModules(modules, reserved) {
+    const size = modules.length;
+    for (let i = 0; i <= 8; i += 1) {
+      if (i !== 6) {
+        setQrFunctionModule(modules, reserved, 8, i, false);
+        setQrFunctionModule(modules, reserved, i, 8, false);
+      }
+    }
+    for (let i = 0; i < 8; i += 1) {
+      setQrFunctionModule(modules, reserved, 8, size - 1 - i, false);
+      setQrFunctionModule(modules, reserved, size - 1 - i, 8, false);
+    }
+  }
+
+  function setQrFunctionModule(modules, reserved, row, col, value) {
+    if (!isInMatrix(modules, row, col)) return;
+    modules[row][col] = !!value;
+    reserved[row][col] = true;
+  }
+
+  function placeQrData(modules, reserved, codewords) {
+    const bits = [];
+    codewords.forEach(codeword => pushBits(bits, codeword, 8));
+    const size = modules.length;
+    let bitIndex = 0;
+    let upward = true;
+
+    for (let col = size - 1; col > 0; col -= 2) {
+      if (col === 6) col -= 1;
+      for (let step = 0; step < size; step += 1) {
+        const row = upward ? size - 1 - step : step;
+        for (let offset = 0; offset < 2; offset += 1) {
+          const targetCol = col - offset;
+          if (reserved[row][targetCol]) continue;
+          modules[row][targetCol] = bitIndex < bits.length ? bits[bitIndex] === 1 : false;
+          bitIndex += 1;
+        }
+      }
+      upward = !upward;
+    }
+  }
+
+  function applyQrMask(modules, reserved, mask) {
+    for (let row = 0; row < modules.length; row += 1) {
+      for (let col = 0; col < modules.length; col += 1) {
+        if (!reserved[row][col] && shouldMaskQrModule(mask, row, col)) modules[row][col] = !modules[row][col];
+      }
+    }
+  }
+
+  function shouldMaskQrModule(mask, row, col) {
+    if (mask === 0) return (row + col) % 2 === 0;
+    if (mask === 1) return row % 2 === 0;
+    if (mask === 2) return col % 3 === 0;
+    if (mask === 3) return (row + col) % 3 === 0;
+    if (mask === 4) return (Math.floor(row / 2) + Math.floor(col / 3)) % 2 === 0;
+    if (mask === 5) return ((row * col) % 2) + ((row * col) % 3) === 0;
+    if (mask === 6) return (((row * col) % 2) + ((row * col) % 3)) % 2 === 0;
+    return (((row + col) % 2) + ((row * col) % 3)) % 2 === 0;
+  }
+
+  function placeQrFormatBits(modules, mask) {
+    const bits = getQrFormatBits(mask);
+    const size = modules.length;
+    for (let i = 0; i <= 5; i += 1) modules[8][i] = ((bits >>> i) & 1) === 1;
+    modules[8][7] = ((bits >>> 6) & 1) === 1;
+    modules[8][8] = ((bits >>> 7) & 1) === 1;
+    modules[7][8] = ((bits >>> 8) & 1) === 1;
+    for (let i = 9; i < 15; i += 1) modules[14 - i][8] = ((bits >>> i) & 1) === 1;
+    for (let i = 0; i < 8; i += 1) modules[size - 1 - i][8] = ((bits >>> i) & 1) === 1;
+    for (let i = 8; i < 15; i += 1) modules[8][size - 15 + i] = ((bits >>> i) & 1) === 1;
+  }
+
+  function getQrFormatBits(mask) {
+    const data = (1 << 3) | mask;
+    let bits = data << 10;
+    for (let i = 14; i >= 10; i -= 1) {
+      if (((bits >>> i) & 1) !== 0) bits ^= 0x537 << (i - 10);
+    }
+    return ((data << 10) | bits) ^ 0x5412;
+  }
+
+  function scoreQrMatrix(matrix) {
+    return scoreQrRuns(matrix, true)
+      + scoreQrRuns(matrix, false)
+      + scoreQrBlocks(matrix)
+      + scoreQrFinderLikePatterns(matrix, true)
+      + scoreQrFinderLikePatterns(matrix, false)
+      + scoreQrBalance(matrix);
+  }
+
+  function scoreQrRuns(matrix, horizontal) {
+    let penalty = 0;
+    const size = matrix.length;
+    for (let outer = 0; outer < size; outer += 1) {
+      let runColor = false;
+      let runLength = 0;
+      for (let inner = 0; inner < size; inner += 1) {
+        const value = horizontal ? matrix[outer][inner] : matrix[inner][outer];
+        if (inner === 0 || value !== runColor) {
+          if (runLength >= 5) penalty += 3 + runLength - 5;
+          runColor = value;
+          runLength = 1;
+        } else {
+          runLength += 1;
+        }
+      }
+      if (runLength >= 5) penalty += 3 + runLength - 5;
+    }
+    return penalty;
+  }
+
+  function scoreQrBlocks(matrix) {
+    let penalty = 0;
+    for (let row = 0; row < matrix.length - 1; row += 1) {
+      for (let col = 0; col < matrix.length - 1; col += 1) {
+        const value = matrix[row][col];
+        if (value === matrix[row][col + 1] && value === matrix[row + 1][col] && value === matrix[row + 1][col + 1]) {
+          penalty += 3;
+        }
+      }
+    }
+    return penalty;
+  }
+
+  function scoreQrFinderLikePatterns(matrix, horizontal) {
+    let penalty = 0;
+    const size = matrix.length;
+    const pattern = [true, false, true, true, true, false, true, false, false, false, false];
+    const reverse = pattern.slice().reverse();
+    for (let outer = 0; outer < size; outer += 1) {
+      for (let inner = 0; inner <= size - pattern.length; inner += 1) {
+        const values = [];
+        for (let i = 0; i < pattern.length; i += 1) {
+          values.push(horizontal ? matrix[outer][inner + i] : matrix[inner + i][outer]);
+        }
+        if (matchesBooleanPattern(values, pattern) || matchesBooleanPattern(values, reverse)) penalty += 40;
+      }
+    }
+    return penalty;
+  }
+
+  function matchesBooleanPattern(values, pattern) {
+    return values.every((value, index) => value === pattern[index]);
+  }
+
+  function scoreQrBalance(matrix) {
+    let dark = 0;
+    matrix.forEach(row => row.forEach(value => { if (value) dark += 1; }));
+    const percent = dark * 100 / (matrix.length * matrix.length);
+    return Math.floor(Math.abs(percent - 50) / 5) * 10;
+  }
+
+  function cloneMatrix(matrix) {
+    return matrix.map(row => row.slice());
+  }
+
+  function isInMatrix(matrix, row, col) {
+    return row >= 0 && col >= 0 && row < matrix.length && col < matrix.length;
+  }
+
+  function textToUtf8Bytes(text) {
+    if (typeof TextEncoder !== 'undefined') {
+      return Array.from(new TextEncoder().encode(text));
+    }
+    const bytes = [];
+    for (let i = 0; i < text.length; i += 1) {
+      let code = text.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+        const next = text.charCodeAt(i + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+          i += 1;
+        }
+      }
+      if (code < 0x80) {
+        bytes.push(code);
+      } else if (code < 0x800) {
+        bytes.push(0xc0 | (code >>> 6), 0x80 | (code & 0x3f));
+      } else if (code < 0x10000) {
+        bytes.push(0xe0 | (code >>> 12), 0x80 | ((code >>> 6) & 0x3f), 0x80 | (code & 0x3f));
+      } else {
+        bytes.push(0xf0 | (code >>> 18), 0x80 | ((code >>> 12) & 0x3f), 0x80 | ((code >>> 6) & 0x3f), 0x80 | (code & 0x3f));
+      }
+    }
+    return bytes;
+  }
+
+  function reedSolomonRemainder(data, degree) {
+    const generator = reedSolomonGenerator(degree);
+    const result = Array(degree).fill(0);
+    data.forEach(value => {
+      const factor = value ^ result.shift();
+      result.push(0);
+      for (let i = 0; i < degree; i += 1) result[i] ^= gfMultiply(generator[i + 1], factor);
+    });
+    return result;
+  }
+
+  function reedSolomonGenerator(degree) {
+    let result = [1];
+    for (let i = 0; i < degree; i += 1) {
+      const next = Array(result.length + 1).fill(0);
+      for (let j = 0; j < result.length; j += 1) {
+        next[j] ^= result[j];
+        next[j + 1] ^= gfMultiply(result[j], gfExp(i));
+      }
+      result = next;
+    }
+    return result;
+  }
+
+  function gfExp(power) {
+    initGfTables();
+    return GF_EXP[power];
+  }
+
+  function gfMultiply(left, right) {
+    if (left === 0 || right === 0) return 0;
+    initGfTables();
+    return GF_EXP[GF_LOG[left] + GF_LOG[right]];
+  }
+
+  let GF_EXP = null;
+  let GF_LOG = null;
+
+  function initGfTables() {
+    if (GF_EXP && GF_LOG) return;
+    GF_EXP = Array(512).fill(0);
+    GF_LOG = Array(256).fill(0);
+    let value = 1;
+    for (let i = 0; i < 255; i += 1) {
+      GF_EXP[i] = value;
+      GF_LOG[value] = i;
+      value <<= 1;
+      if (value & 0x100) value ^= 0x11d;
+    }
+    for (let i = 255; i < 512; i += 1) GF_EXP[i] = GF_EXP[i - 255];
+  }
+
+  function renderQrMatrixToPng(matrix, options) {
+    const quietModules = options.includeBackground === false ? 0 : 4;
+    const scale = 8;
+    const moduleCount = matrix.length + quietModules * 2;
+    const width = moduleCount * scale;
+    const height = width;
+    const transparentBackground = options.includeBackground === false;
+    const scanlineLength = width * 4 + 1;
+    const raw = new Uint8Array(scanlineLength * height);
+
+    for (let y = 0; y < height; y += 1) {
+      const lineOffset = y * scanlineLength;
+      raw[lineOffset] = 0;
+      const moduleY = Math.floor(y / scale) - quietModules;
+      for (let x = 0; x < width; x += 1) {
+        const moduleX = Math.floor(x / scale) - quietModules;
+        const dark = moduleY >= 0 && moduleX >= 0 && moduleY < matrix.length && moduleX < matrix.length
+          ? matrix[moduleY][moduleX]
+          : false;
+        const offset = lineOffset + 1 + x * 4;
+        raw[offset] = dark ? 0 : 255;
+        raw[offset + 1] = dark ? 0 : 255;
+        raw[offset + 2] = dark ? 0 : 255;
+        raw[offset + 3] = dark || !transparentBackground ? 255 : 0;
+      }
+    }
+
+    return makePng(width, height, raw);
+  }
+
+  function makePng(width, height, rgbaScanlines) {
+    return concatByteArrays([
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      makePngChunk('IHDR', concatByteArrays([
+        uint32Bytes(width),
+        uint32Bytes(height),
+        new Uint8Array([8, 6, 0, 0, 0]),
+      ])),
+      makePngChunk('IDAT', zlibStore(rgbaScanlines)),
+      makePngChunk('IEND', new Uint8Array(0)),
+    ]);
+  }
+
+  function makePngChunk(type, data) {
+    const typeBytes = asciiBytes(type);
+    const crcInput = concatByteArrays([typeBytes, data]);
+    return concatByteArrays([
+      uint32Bytes(data.length),
+      typeBytes,
+      data,
+      uint32Bytes(crc32(crcInput)),
+    ]);
+  }
+
+  function zlibStore(data) {
+    const parts = [new Uint8Array([0x78, 0x01])];
+    for (let offset = 0; offset < data.length; offset += 65535) {
+      const length = Math.min(65535, data.length - offset);
+      const final = offset + length >= data.length ? 1 : 0;
+      const header = new Uint8Array([
+        final,
+        length & 0xff,
+        (length >>> 8) & 0xff,
+        (~length) & 0xff,
+        ((~length) >>> 8) & 0xff,
+      ]);
+      parts.push(header, data.slice(offset, offset + length));
+    }
+    parts.push(uint32Bytes(adler32(data)));
+    return concatByteArrays(parts);
+  }
+
+  function uint32Bytes(value) {
+    return new Uint8Array([
+      (value >>> 24) & 0xff,
+      (value >>> 16) & 0xff,
+      (value >>> 8) & 0xff,
+      value & 0xff,
+    ]);
+  }
+
+  function asciiBytes(text) {
+    const bytes = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i += 1) bytes[i] = text.charCodeAt(i);
+    return bytes;
+  }
+
+  function concatByteArrays(parts) {
+    const length = parts.reduce((sum, part) => sum + part.length, 0);
+    const result = new Uint8Array(length);
+    let offset = 0;
+    parts.forEach(part => {
+      result.set(part, offset);
+      offset += part.length;
+    });
+    return result;
+  }
+
+  function crc32(bytes) {
+    let crc = 0xffffffff;
+    for (let i = 0; i < bytes.length; i += 1) {
+      crc ^= bytes[i];
+      for (let bit = 0; bit < 8; bit += 1) {
+        crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+      }
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function adler32(bytes) {
+    let a = 1;
+    let b = 0;
+    for (let i = 0; i < bytes.length; i += 1) {
+      a = (a + bytes[i]) % 65521;
+      b = (b + a) % 65521;
+    }
+    return ((b << 16) | a) >>> 0;
+  }
+
+  async function applyPageNumbers(ctx, options) {
+    const target = options && options.target ? options.target : 'all';
+    return commitTargetPages(ctx, 'stamp-tools', 'ページ番号挿入', target, async (refs, tab) => {
+      const font = await embedHelvetica(ctx, tab.pdfDoc);
+      const fontSize = readPositiveNumber(defaultValue(options && options.fontSize, 10), 'フォントサイズ');
+      const margin = mmToPt(readNonNegativeNumber(defaultValue(options && options.margin, 10), '余白'));
+      const color = parseColor(ctx, options && options.color ? options.color : '#000000');
+      const opacity = normalizeOpacity(options && options.opacity);
+      const total = getPageCount(tab);
+
+      refs.forEach(ref => {
+        requireMethod(ref.page, 'drawText');
+        const text = formatPageNumber(ref.index, total, options && options.format);
+        const width = getTextWidth(font, text, fontSize);
+        const position = getPosition(ref.page, width, fontSize, options && options.position ? options.position : 'bottom-center', margin);
+        ref.page.drawText(text, {
+          x: position.x,
+          y: position.y,
+          size: fontSize,
+          font: font,
+          color: color,
+          opacity: opacity,
+        });
+      });
+    }, 'ページ番号を挿入しました。');
+  }
+
+  async function applyDateStamp(ctx, options) {
+    return commitTargetPages(ctx, 'stamp-tools', '日付挿入', getTarget(options), async (refs, tab) => {
+      const text = formatDateStampText(options && options.text, options && options.format);
+      const fontSize = readPositiveNumber(defaultValue(options && options.fontSize, 10), 'サイズ');
+      const margin = mmToPt(readNonNegativeNumber(defaultValue(options && options.margin, 10), '余白'));
+      const color = parseColor(ctx, options && options.color ? options.color : '#000000');
+      const opacity = normalizeOpacity(options && options.opacity);
+
+      if (containsNonAscii(text)) {
+        const imageBytes = createTextImageBytes(text, fontSize, options && options.color ? options.color : '#000000');
+        const image = await tab.pdfDoc.embedPng(imageBytes);
+        const size = estimateTextImageSize(text, fontSize);
+        refs.forEach(ref => {
+          requireMethod(ref.page, 'drawImage');
+          const position = getPosition(ref.page, size.width, size.height, options && options.position ? options.position : 'top-right', margin);
+          ref.page.drawImage(image, {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+            opacity: opacity,
+          });
+        });
+        return;
+      }
+
+      const font = await embedHelvetica(ctx, tab.pdfDoc);
+      refs.forEach(ref => {
+        requireMethod(ref.page, 'drawText');
+        const width = getTextWidth(font, text, fontSize);
+        const position = getPosition(ref.page, width, fontSize, options && options.position ? options.position : 'top-right', margin);
+        ref.page.drawText(text, {
+          x: position.x,
+          y: position.y,
+          size: fontSize,
+          font: font,
+          color: color,
+          opacity: opacity,
+        });
+      });
+    }, '日付を挿入しました。');
+  }
+
+  async function applyFixedStamp(ctx, options) {
+    return commitTargetPages(ctx, 'stamp-tools', '透かしスタンプ挿入', getFixedStampTarget(options), async (refs, tab) => {
+      const text = getWatermarkStampText(options);
+      const placement = getStampPlacementPoints({
+        width: FIXED_STAMP_WIDTH_MM,
+        height: FIXED_STAMP_HEIGHT_MM,
+      });
+      const opacity = FIXED_STAMP_OPACITY;
+      const rotation = getRotation(ctx, FIXED_STAMP_ROTATE);
+      const color = parseColor(ctx, options && options.color ? options.color : '#d32f2f');
+
+      if (containsNonAscii(text)) {
+        const fontSize = Math.max(12, placement.height * 0.58);
+        const imageBytes = createTextImageBytes(text, fontSize, options && options.color ? options.color : '#d32f2f');
+        const image = await tab.pdfDoc.embedPng(imageBytes);
+        refs.forEach(ref => {
+          requireMethod(ref.page, 'drawImage');
+          const origin = resolveStampOrigin(ref.page, placement, options);
+          ref.page.drawImage(image, {
+            x: origin.x,
+            y: origin.y,
+            width: placement.width,
+            height: placement.height,
+            opacity: opacity,
+            rotate: rotation,
+          });
+        });
+        return;
+      }
+
+      const font = await embedHelvetica(ctx, tab.pdfDoc);
+      const fontSize = Math.min(placement.height * 0.72, placement.width / Math.max(text.length * 0.55, 1));
+      refs.forEach(ref => {
+        requireMethod(ref.page, 'drawText');
+        const width = getTextWidth(font, text, fontSize);
+        const origin = resolveStampOrigin(ref.page, { x: placement.x, y: placement.y, width: width, height: fontSize }, options);
+        ref.page.drawText(text, {
+          x: origin.x,
+          y: origin.y,
+          size: fontSize,
+          font: font,
+          color: color,
+          opacity: opacity,
+          rotate: rotation,
+        });
+      });
+    }, '透かしスタンプを挿入しました。');
+  }
+
+  async function flattenForm(ctx, options) {
+    if (!options || !options.confirmed) {
+      showToast(ctx, 'フォーム固定を確認してください。', 'warning');
+      return false;
+    }
+
+    return commitDocumentMutation(ctx, 'form-flatten', 'フォーム固定', tab => {
+      if (!tab.pdfDoc || typeof tab.pdfDoc.getForm !== 'function') {
+        showToast(ctx, 'フォームは見つかりませんでした。', 'info');
+        return false;
+      }
+
+      let form;
+      let fields;
+      try {
+        form = tab.pdfDoc.getForm();
+        fields = form && typeof form.getFields === 'function' ? form.getFields() : [];
+      } catch (err) {
+        showToast(ctx, 'フォームは見つかりませんでした。', 'info');
+        return false;
+      }
+
+      if (Array.isArray(fields) && fields.length === 0) {
+        showToast(ctx, 'フォームは見つかりませんでした。', 'info');
+        return false;
+      }
+
+      if (!form || typeof form.flatten !== 'function') {
+        showToast(ctx, 'フォームは見つかりませんでした。', 'info');
+        return false;
+      }
+
+      if (typeof form.updateFieldAppearances === 'function') {
+        form.updateFieldAppearances();
+      }
+      form.flatten();
+      return true;
+    }, 'フォームを固定しました。');
+  }
+
+  async function commitTargetPages(ctx, pluginId, actionName, target, mutate, successMessage) {
+    const tab = ctx.getActiveTab();
+    if (!tab) {
+      showToast(ctx, 'PDFを開いてください。', 'warning');
+      return false;
+    }
+
+    let indices;
+    try {
+      indices = getTargetPageIndices(tab, target);
+    } catch (err) {
+      showToast(ctx, err && err.message ? err.message : 'ページ指定を確認してください。', 'warning');
+      return false;
+    }
+    if (indices.length === 0) {
+      showToast(ctx, target === 'all' ? 'PDFにページがありません。' : 'ページを選択してください。', 'warning');
+      return false;
+    }
+
+    const snapshotBefore = tab.pdfBytes;
+    let refs;
+    try {
+      refs = indices.map(index => ({ index: index, page: tab.pdfDoc.getPage(index) }));
+      const changed = await mutate(refs, tab);
+      if (changed === false) return false;
+    } catch (err) {
+      showToast(ctx, err && err.message ? err.message : '入力値を確認してください。', 'warning');
+      return false;
+    }
+
+    return finishPdfMutation(ctx, tab, pluginId, actionName, indices, snapshotBefore, successMessage);
+  }
+
+  async function commitDocumentMutation(ctx, pluginId, actionName, mutate, successMessage) {
+    const tab = ctx.getActiveTab();
+    if (!tab) {
+      showToast(ctx, 'PDFを開いてください。', 'warning');
+      return false;
+    }
+
+    const snapshotBefore = tab.pdfBytes;
+    let changed;
+    try {
+      changed = await mutate(tab);
+      if (changed === false) return false;
+    } catch (err) {
+      showToast(ctx, err && err.message ? err.message : '処理できませんでした。', 'warning');
+      return false;
+    }
+
+    return finishPdfMutation(ctx, tab, pluginId, actionName, [], snapshotBefore, successMessage);
+  }
+
+  async function finishPdfMutation(ctx, tab, pluginId, actionName, indices, snapshotBefore, successMessage) {
+    const bytesAfter = await tab.pdfDoc.save();
+    if (typeof ctx.pushUndo === 'function') {
+      ctx.pushUndo(tab, {
+        type: 'insert',
+        at: 0,
+        count: 0,
+        plugin: pluginId,
+        action: actionName,
+        pages: indices,
+        pdfBytesSnapshot: snapshotBefore,
+        pdfBytesAfter: bytesAfter,
+      });
+    }
+
+    tab.pdfBytes = bytesAfter;
+    if (typeof ctx.refreshTab === 'function') {
+      await ctx.refreshTab(tab);
+    }
+    showToast(ctx, successMessage, 'success');
+    return true;
+  }
+
+  async function commitSelectedPages(ctx, actionName, mutate, successMessage) {
+    const tab = ctx.getActiveTab();
+    if (!tab) {
+      showToast(ctx, 'PDFを開いてください。', 'warning');
+      return false;
+    }
+
+    const indices = getSelectedPageIndices(tab);
+    if (indices.length === 0) {
+      showToast(ctx, 'ページを選択してください。', 'warning');
+      return false;
+    }
+
+    const snapshotBefore = tab.pdfBytes;
+    let refs;
+    try {
+      refs = indices.map(index => ({ index: index, page: tab.pdfDoc.getPage(index) }));
+      mutate(refs, tab);
+    } catch (err) {
+      showToast(ctx, err && err.message ? err.message : '入力値を確認してください。', 'warning');
+      return false;
+    }
+
+    const bytesAfter = await tab.pdfDoc.save();
+    ctx.pushUndo(tab, {
+      type: 'insert',
+      at: 0,
+      count: 0,
+      plugin: 'page-transform',
+      action: actionName,
+      pages: indices,
+      pdfBytesSnapshot: snapshotBefore,
+      pdfBytesAfter: bytesAfter,
+    });
+
+    tab.pdfBytes = bytesAfter;
+    await ctx.refreshTab(tab);
+    showToast(ctx, successMessage, 'success');
+    return true;
+  }
+
+  function getSelectedPageIndices(tab) {
+    if (!tab || !Array.isArray(tab.selectedPages)) return [];
+    const selected = [];
+    tab.selectedPages.forEach(index => {
+      const numeric = Number(index);
+      if (
+        Number.isInteger(numeric)
+        && numeric >= 0
+        && numeric < tab.pageCount
+        && selected.indexOf(numeric) === -1
+      ) {
+        selected.push(numeric);
+      }
+    });
+    selected.sort((a, b) => a - b);
+    return selected;
+  }
+
+  function getTargetPageIndices(tab, target) {
+    if (target === 'all') {
+      const count = getPageCount(tab);
+      const indices = [];
+      for (let i = 0; i < count; i += 1) indices.push(i);
+      return indices;
+    }
+
+    if (target === 'first') {
+      return getPageCount(tab) > 0 ? [0] : [];
+    }
+
+    if (typeof target === 'string' && target.indexOf('pages:') === 0) {
+      return parsePageRangeTarget(tab, target.slice('pages:'.length));
+    }
+
+    const selected = getSelectedPageIndices(tab);
+    if (target === 'active') {
+      return selected.length > 0 ? [selected[0]] : [];
+    }
+    return selected;
+  }
+
+  function getPageCount(tab) {
+    if (tab && tab.pdfDoc && typeof tab.pdfDoc.getPageCount === 'function') {
+      return tab.pdfDoc.getPageCount();
+    }
+    return tab && Number.isInteger(tab.pageCount) ? tab.pageCount : 0;
+  }
+
+  function getTarget(options) {
+    return options && options.target ? options.target : 'selected';
+  }
+
+  function getFixedStampTarget(options) {
+    return options && options.target ? options.target : 'all';
+  }
+
+  function getWatermarkStampText(options) {
+    const rawText = options && options.text !== undefined
+      ? options.text
+      : options && options.preset !== undefined
+        ? options.preset
+        : WATERMARK_STAMP_DEFAULT_TEXT;
+    const text = String(rawText || '').trim();
+    if (!text) throw new Error('透かし文字を入力してください。');
+    if (text.length > 40) throw new Error('透かし文字は40文字以内で入力してください。');
+    return text;
+  }
+
+  function parsePageRangeTarget(tab, value) {
+    const text = String(value || '').trim();
+    if (!text) throw new Error('ページ指定を入力してください。例: 1,3-5');
+    const count = getPageCount(tab);
+    const selected = [];
+    text.split(',').forEach(part => {
+      const token = part.trim();
+      const match = token.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+      if (!match) throw new Error('ページ指定は 1,3-5 の形式で入力してください。');
+      const start = Number(match[1]);
+      const end = match[2] === undefined ? start : Number(match[2]);
+      if (end < start) throw new Error('ページ範囲は小さい番号から入力してください。例: 1,3-5');
+      for (let pageNumber = start; pageNumber <= end; pageNumber += 1) {
+        if (pageNumber < 1 || pageNumber > count) {
+          throw new Error('存在しないページ番号が含まれています。ページ指定を確認してください。');
+        }
+        const index = pageNumber - 1;
+        if (selected.indexOf(index) < 0) selected.push(index);
+      }
+    });
+    selected.sort((a, b) => a - b);
+    return selected;
+  }
+
+  function getPlacementPoints(options, allowZeroSize) {
+    const widthLabel = allowZeroSize ? '幅' : '幅';
+    const heightLabel = allowZeroSize ? '高さ' : '高さ';
+    return {
+      x: mmToPt(readNonNegativeNumber(defaultValue(options && options.x, 0), 'x座標')),
+      y: mmToPt(readNonNegativeNumber(defaultValue(options && options.y, 0), 'y座標')),
+      width: mmToPt(allowZeroSize
+        ? readNonNegativeNumber(defaultValue(options && options.width, 0), widthLabel)
+        : readPositiveNumber(defaultValue(options && options.width, 1), widthLabel)),
+      height: mmToPt(allowZeroSize
+        ? readNonNegativeNumber(defaultValue(options && options.height, 0), heightLabel)
+        : readPositiveNumber(defaultValue(options && options.height, 1), heightLabel)),
+    };
+  }
+
+  function getStampPlacementPoints(options) {
+    return {
+      x: mmToPt(readNonNegativeNumber(defaultValue(options && options.x, 0), 'x座標')),
+      y: mmToPt(readNonNegativeNumber(defaultValue(options && options.y, 0), 'y座標')),
+      width: mmToPt(readPositiveNumber(defaultValue(options && options.width, 90), '幅')),
+      height: mmToPt(readPositiveNumber(defaultValue(options && options.height, 30), '高さ')),
+    };
+  }
+
+  function normalizeShapeKind(value) {
+    const kind = String(value || 'rectangle').toLowerCase();
+    if (kind === 'line' || kind === '線') return 'line';
+    if (kind === 'ellipse' || kind === 'circle' || kind === '丸') return 'ellipse';
+    return 'rectangle';
+  }
+
+  function resolveStampOrigin(page, placement, options) {
+    if (options && options.placement === 'custom') {
+      return { x: placement.x, y: placement.y };
+    }
+
+    const size = page.getSize();
+    return {
+      x: (size.width - placement.width) / 2,
+      y: (size.height - placement.height) / 2,
+    };
+  }
+
+  function marginsToPoints(values) {
+    return {
+      top: mmToPt(readNonNegativeNumber(values.top, '上')),
+      right: mmToPt(readNonNegativeNumber(values.right, '右')),
+      bottom: mmToPt(readNonNegativeNumber(values.bottom, '下')),
+      left: mmToPt(readNonNegativeNumber(values.left, '左')),
+    };
+  }
+
+  function getCropBox(page, margins) {
+    requireMethod(page, 'setCropBox');
+    const size = page.getSize();
+    const cropWidth = size.width - margins.left - margins.right;
+    const cropHeight = size.height - margins.top - margins.bottom;
+    if (cropWidth <= 0 || cropHeight <= 0) {
+      throw new Error('トリミング量がページサイズを超えています。');
+    }
+    return {
+      x: margins.left,
+      y: margins.bottom,
+      width: cropWidth,
+      height: cropHeight,
+    };
+  }
+
+  function resolveTargetSize(options) {
+    const preset = options && options.preset ? options.preset : 'a4-portrait';
+    if (preset !== 'custom' && PAGE_SIZE_PRESETS_MM[preset]) {
+      const size = PAGE_SIZE_PRESETS_MM[preset];
+      return {
+        width: mmToPt(size.width),
+        height: mmToPt(size.height),
+      };
+    }
+    return {
+      width: mmToPt(readPositiveNumber(options.width, '幅')),
+      height: mmToPt(readPositiveNumber(options.height, '高さ')),
+    };
+  }
+
+  function getResizePlan(page, targetSize, fitContent) {
+    requireMethod(page, 'setSize');
+    const oldSize = page.getSize();
+    const plan = {
+      width: targetSize.width,
+      height: targetSize.height,
+      scale: 1,
+      dx: 0,
+      dy: 0,
+      fitContent: !!fitContent,
+    };
+
+    if (fitContent) {
+      requireMethod(page, 'scaleContent');
+      requireMethod(page, 'translateContent');
+      plan.scale = Math.min(targetSize.width / oldSize.width, targetSize.height / oldSize.height, 1);
+      plan.dx = (targetSize.width - oldSize.width * plan.scale) / 2;
+      plan.dy = (targetSize.height - oldSize.height * plan.scale) / 2;
+    }
+
+    return plan;
+  }
+
+  function applyResizePlan(page, plan) {
+    if (plan.fitContent && plan.scale < 1) {
+      page.scaleContent(plan.scale, plan.scale);
+      page.translateContent(plan.dx, plan.dy);
+    }
+    page.setSize(plan.width, plan.height);
+    setVisiblePageBox(page, plan.width, plan.height);
+  }
+
+  function setVisiblePageBox(page, width, height) {
+    if (page && typeof page.setCropBox === 'function') {
+      page.setCropBox(0, 0, width, height);
+    }
+  }
+
+  function normalizeScalePercent(percent) {
+    const value = readPositiveNumber(percent, '縮小率');
+    const scale = value / 100;
+    if (scale < 0.1 || scale > 1) {
+      throw new Error('縮小率は10%から100%の範囲で指定してください。');
+    }
+    return scale;
+  }
+
+  function readNonNegativeNumber(value, label) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) {
+      throw new Error(label + 'は0以上の数値で指定してください。');
+    }
+    return number;
+  }
+
+  function readPositiveNumber(value, label) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) {
+      throw new Error(label + 'は0より大きい数値で指定してください。');
+    }
+    return number;
+  }
+
+  function readFiniteNumber(value, label) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      throw new Error(label + 'は数値で指定してください。');
+    }
+    return number;
+  }
+
+  function defaultValue(value, fallback) {
+    return value === undefined || value === null || value === '' ? fallback : value;
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(Math.max(Number(value), min), max);
+  }
+
+  function normalizeOpacity(value) {
+    const number = readFiniteNumber(defaultValue(value, 1), '透明度');
+    if (number < 0 || number > 1) {
+      throw new Error('透明度は0から1の範囲で指定してください。');
+    }
+    return number;
+  }
+
+  function parseColor(ctx, hex) {
+    if (!ctx || !ctx.PDFLib || typeof ctx.PDFLib.rgb !== 'function') return undefined;
+    const match = String(hex || '').trim().match(/^#?([0-9a-f]{6})$/i);
+    if (!match) {
+      throw new Error('色は#RRGGBB形式で指定してください。');
+    }
+
+    const value = match[1];
+    return ctx.PDFLib.rgb(
+      parseInt(value.slice(0, 2), 16) / 255,
+      parseInt(value.slice(2, 4), 16) / 255,
+      parseInt(value.slice(4, 6), 16) / 255
+    );
+  }
+
+  function normalizeImageBytes(value) {
+    if (!value) throw new Error('画像データがありません。');
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    throw new Error('画像データを読み込めませんでした。');
+  }
+
+  async function embedRasterImage(pdfDoc, bytes, mimeType, filename) {
+    if (isPngImage(bytes, mimeType, filename)) {
+      requireMethod(pdfDoc, 'embedPng');
+      return pdfDoc.embedPng(bytes);
+    }
+    if (isJpegImage(bytes, mimeType, filename)) {
+      requireMethod(pdfDoc, 'embedJpg');
+      return pdfDoc.embedJpg(bytes);
+    }
+    throw new Error('PNGまたはJPEG画像を選択してください。');
+  }
+
+  function isPngImage(bytes, mimeType, filename) {
+    return mimeType === 'image/png'
+      || /\.png$/i.test(filename || '')
+      || (bytes.length >= 8
+        && bytes[0] === 0x89
+        && bytes[1] === 0x50
+        && bytes[2] === 0x4e
+        && bytes[3] === 0x47);
+  }
+
+  function isJpegImage(bytes, mimeType, filename) {
+    return mimeType === 'image/jpeg'
+      || mimeType === 'image/jpg'
+      || /\.jpe?g$/i.test(filename || '')
+      || (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff);
+  }
+
+  function getImageDrawSize(image, placement, keepAspect) {
+    if (!keepAspect) {
+      return { width: placement.width, height: placement.height };
+    }
+
+    const embeddedWidth = Number(image && (image.width || image.Width));
+    const embeddedHeight = Number(image && (image.height || image.Height));
+    if (!Number.isFinite(embeddedWidth) || !Number.isFinite(embeddedHeight) || embeddedWidth <= 0 || embeddedHeight <= 0) {
+      return { width: placement.width, height: placement.height };
+    }
+
+    const scale = Math.min(placement.width / embeddedWidth, placement.height / embeddedHeight);
+    return {
+      width: embeddedWidth * scale,
+      height: embeddedHeight * scale,
+    };
+  }
+
+  async function readFileBytes(file) {
+    if (file && typeof file.arrayBuffer === 'function') {
+      return new Uint8Array(await file.arrayBuffer());
+    }
+
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(new Uint8Array(reader.result));
+      reader.onerror = () => reject(reader.error || new Error('FileReader error'));
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  async function embedHelvetica(ctx, pdfDoc) {
+    requireMethod(pdfDoc, 'embedFont');
+    if (ctx && ctx.PDFLib && ctx.PDFLib.StandardFonts) {
+      return pdfDoc.embedFont(ctx.PDFLib.StandardFonts.Helvetica);
+    }
+    return pdfDoc.embedFont('Helvetica');
+  }
+
+  function formatPageNumber(index, total, format) {
+    const pageNumber = index + 1;
+    if (format === 'total') return pageNumber + ' / ' + total;
+    if (format === 'page') return 'Page ' + pageNumber;
+    if (format === 'p') return 'p.' + pageNumber;
+    return String(pageNumber);
+  }
+
+  function formatDateStampText(text, format) {
+    const source = String(text || todayIsoDate());
+    const parts = source.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    if (!parts) return source;
+    const year = parts[1];
+    const month = Number(parts[2]);
+    const day = Number(parts[3]);
+    if (format === 'yyyy/mm/dd') {
+      return year + '/' + pad2(month) + '/' + pad2(day);
+    }
+    if (format === 'jp') {
+      return year + '年' + month + '月' + day + '日';
+    }
+    return year + '-' + pad2(month) + '-' + pad2(day);
+  }
+
+  function pad2(value) {
+    return String(value).padStart(2, '0');
+  }
+
+  function getTextWidth(font, text, size) {
+    if (font && typeof font.widthOfTextAtSize === 'function') {
+      return font.widthOfTextAtSize(text, size);
+    }
+    return String(text).length * size * 0.55;
+  }
+
+  function getPosition(page, itemWidth, itemHeight, position, margin) {
+    const size = page.getSize();
+    const horizontal = position.indexOf('left') >= 0
+      ? 'left'
+      : position.indexOf('right') >= 0
+        ? 'right'
+        : 'center';
+    const vertical = position.indexOf('top') >= 0
+      ? 'top'
+      : position.indexOf('bottom') >= 0
+        ? 'bottom'
+        : 'center';
+
+    const x = horizontal === 'left'
+      ? margin
+      : horizontal === 'right'
+        ? size.width - margin - itemWidth
+        : (size.width - itemWidth) / 2;
+    const y = vertical === 'top'
+      ? size.height - margin - itemHeight
+      : vertical === 'bottom'
+        ? margin
+        : (size.height - itemHeight) / 2;
+
+    return { x: x, y: y };
+  }
+
+  function containsNonAscii(text) {
+    return /[^\x00-\x7F]/.test(String(text || ''));
+  }
+
+  function createTextImageBytes(text, fontSize, color) {
+    if (typeof document === 'undefined') {
+      return placeholderPngBytes();
+    }
+
+    const canvas = document.createElement('canvas');
+    if (!canvas || typeof canvas.getContext !== 'function') {
+      return placeholderPngBytes();
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return placeholderPngBytes();
+
+    const textValue = String(text || '');
+    const size = Math.max(12, Number(fontSize) || 24);
+    ctx.font = 'bold ' + size + 'px sans-serif';
+    const width = Math.max(Math.ceil(ctx.measureText(textValue).width + size), size * 3);
+    const height = Math.ceil(size * 1.7);
+    canvas.width = width;
+    canvas.height = height;
+    ctx.clearRect(0, 0, width, height);
+    ctx.font = 'bold ' + size + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color || '#d32f2f';
+    ctx.fillText(textValue, width / 2, height / 2);
+
+    if (typeof canvas.toDataURL !== 'function') return placeholderPngBytes();
+    return dataUrlToBytes(canvas.toDataURL('image/png'));
+  }
+
+  function estimateTextImageSize(text, fontSize) {
+    const size = Math.max(8, Number(fontSize) || 10);
+    return {
+      width: Math.max(String(text || '').length * size * 0.9, size * 3),
+      height: size * 1.5,
+    };
+  }
+
+  function dataUrlToBytes(dataUrl) {
+    const comma = dataUrl.indexOf(',');
+    if (comma < 0) return placeholderPngBytes();
+    const base64 = dataUrl.slice(comma + 1);
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function placeholderPngBytes() {
+    return new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+      0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+      0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+      0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+      0x42, 0x60, 0x82,
+    ]);
+  }
+
+  function mmToPt(mm) {
+    return Number(mm) * PT_PER_MM;
+  }
+
+  function normalizeAngle(angle) {
+    return ((angle % 360) + 360) % 360;
+  }
+
+  function getPageRotationAngle(page) {
+    if (!page || typeof page.getRotation !== 'function') return 0;
+    const rotation = page.getRotation();
+    return rotation && Number.isFinite(rotation.angle) ? rotation.angle : 0;
+  }
+
+  function getRotation(ctx, angle) {
+    if (ctx && ctx.PDFLib && typeof ctx.PDFLib.degrees === 'function') {
+      return ctx.PDFLib.degrees(angle);
+    }
+    return undefined;
+  }
+
+  function todayIsoDate() {
+    const now = new Date();
+    return now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-' + pad2(now.getDate());
+  }
+
+  function requireMethod(target, methodName) {
+    if (!target || typeof target[methodName] !== 'function') {
+      throw new Error('このPDF操作は現在の環境で利用できません: ' + methodName);
+    }
+  }
+
+  function showToast(ctx, message, type) {
+    if (ctx && typeof ctx.showToast === 'function') {
+      ctx.showToast(message, type);
+    }
+  }
+})();

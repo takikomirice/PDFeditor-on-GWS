@@ -347,12 +347,15 @@ body.is-resizing-sidebar #sidebar-resizer::before {
 }
 
 .preview-page {
-  max-width: 100%;
+  width: max-content;
+  max-width: none;
+  margin: 0 auto;
   scroll-margin: 32px 0 108px;
 }
 
 .preview-page canvas {
-  max-width: 100%;
+  max-width: none;
+  height: auto;
   box-shadow: var(--shadow);
   background: white;
   display: block;
@@ -485,6 +488,13 @@ body.is-resizing-sidebar #sidebar-resizer::before {
   align-items: center;
   padding: 4px 0;
   font-size: 13px;
+}
+
+.shortcut-note {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 kbd {
@@ -749,6 +759,7 @@ kbd {
         <div class="shortcut-row"><kbd>Ctrl+V</kbd><span>ページペースト</span></div>
         <div class="shortcut-row"><kbd>Ctrl+Shift+D</kbd><span>ページ複製</span></div>
         <div class="shortcut-row"><kbd>Ctrl+Shift+E</kbd><span>選択ページを分割</span></div>
+        <p class="shortcut-note">入力欄にフォーカスがある場合、コピー・貼り付け・全選択・Undoなどのテキスト編集ショートカットが優先されます。</p>
       </div>
       <div class="shortcut-section">
         <h3>表示</h3>
@@ -871,6 +882,8 @@ const ZOOM_STEP = 0.25;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 5.0;
 const BASE_PREVIEW_SCALE = 1.5;
+const MAX_PREVIEW_CANVAS_OUTPUT_SCALE = 2;
+const MAX_PREVIEW_CANVAS_PIXELS = 16000000;
 const DEFAULT_SIDEBAR_WIDTH = 220;
 const MIN_SIDEBAR_WIDTH = 160;
 const MAX_SIDEBAR_WIDTH = 420;
@@ -978,6 +991,44 @@ function computeFitZoom(options) {
   return clamp(Math.min(widthZoom, heightZoom), options.minZoom, options.maxZoom);
 }
 
+function getCanvasOutputScale(options) {
+  const opts = options || {};
+  const dpr = Number(window.devicePixelRatio);
+  const safeDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const requestedMaxScale = Number(opts.maxScale);
+  const maxScale = Number.isFinite(requestedMaxScale) && requestedMaxScale > 0
+    ? requestedMaxScale
+    : MAX_PREVIEW_CANVAS_OUTPUT_SCALE;
+  return Math.max(1, Math.min(safeDpr, maxScale));
+}
+
+function prepareHiDpiCanvas(canvas, viewport, options) {
+  const opts = options || {};
+  const cssWidth = Math.floor(viewport.width);
+  const cssHeight = Math.floor(viewport.height);
+  const viewportPixels = Math.max(viewport.width * viewport.height, 1);
+  let outputScale = getCanvasOutputScale(opts);
+  const requestedMaxPixels = Number(opts.maxPixels);
+  const maxPixels = Number.isFinite(requestedMaxPixels) && requestedMaxPixels > 0
+    ? requestedMaxPixels
+    : MAX_PREVIEW_CANVAS_PIXELS;
+
+  if (viewportPixels * outputScale * outputScale > maxPixels) {
+    outputScale = Math.sqrt(maxPixels / viewportPixels);
+  }
+
+  canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
+  canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
+  canvas.style.width = cssWidth + 'px';
+  canvas.style.height = 'auto';
+  canvas.style.aspectRatio = viewport.width + ' / ' + viewport.height;
+
+  return {
+    outputScale: outputScale,
+    transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null,
+  };
+}
+
 function computeDropPlacement(rect, clientX, clientY, layoutMode) {
   if (layoutMode === 'grid') {
     const midX = rect.left + rect.width / 2;
@@ -1073,32 +1124,17 @@ function dismissToast(toastId) {
 }
 
 // === メニューバー ===
+let openMenuItem = null;
+
+function closeAllMenus() {
+  document.querySelectorAll('.menu-item').forEach(m => m.classList.remove('open'));
+  openMenuItem = null;
+}
+
 function initMenuBar() {
   const menuItems = document.querySelectorAll('.menu-item');
-  let openMenu = null;
 
-  menuItems.forEach(item => {
-    const label = item.querySelector('.menu-label');
-    label.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (openMenu === item) {
-        closeAllMenus();
-      } else {
-        closeAllMenus();
-        item.classList.add('open');
-        openMenu = item;
-      }
-    });
-
-    // ホバーで別メニューに切り替え
-    label.addEventListener('mouseenter', () => {
-      if (openMenu && openMenu !== item) {
-        closeAllMenus();
-        item.classList.add('open');
-        openMenu = item;
-      }
-    });
-  });
+  menuItems.forEach(item => bindMenuItem(item));
 
   // メニュー外クリックで閉じる
   document.addEventListener('click', () => closeAllMenus());
@@ -1114,11 +1150,33 @@ function initMenuBar() {
       }
     });
   });
+}
 
-  function closeAllMenus() {
-    menuItems.forEach(m => m.classList.remove('open'));
-    openMenu = null;
-  }
+function bindMenuItem(item) {
+  if (!item || item.dataset.menuBound === 'true') return;
+  const label = item.querySelector('.menu-label');
+  if (!label) return;
+  item.dataset.menuBound = 'true';
+
+  label.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (openMenuItem === item) {
+      closeAllMenus();
+    } else {
+      closeAllMenus();
+      item.classList.add('open');
+      openMenuItem = item;
+    }
+  });
+
+  // ホバーで別メニューに切り替え
+  label.addEventListener('mouseenter', () => {
+    if (openMenuItem && openMenuItem !== item) {
+      closeAllMenus();
+      item.classList.add('open');
+      openMenuItem = item;
+    }
+  });
 }
 
 function handleMenuAction(action) {
@@ -1141,6 +1199,100 @@ function handleMenuAction(action) {
     case 'split-pdf': showSplitDialog(); break;
     case 'toggle-grid': toggleViewMode(); break;
   }
+}
+
+function isValidPluginMenuId(menuId) {
+  return /^[a-z0-9_-]+$/i.test(String(menuId || ''));
+}
+
+function getMenuElement(menuId) {
+  if (!isValidPluginMenuId(menuId)) return null;
+  return document.querySelector('.menu-item[data-menu="' + menuId + '"]');
+}
+
+function getMenuDropdown(menuId) {
+  const menu = getMenuElement(menuId);
+  return menu ? menu.querySelector('.menu-dropdown') : null;
+}
+
+function addTopMenu(menuId, label, options) {
+  if (!isValidPluginMenuId(menuId) || !label) return null;
+  const existing = getMenuElement(menuId);
+  if (existing) return existing;
+
+  const menuBar = document.querySelector('#menu-bar');
+  if (!menuBar) return null;
+
+  const menu = document.createElement('div');
+  menu.className = 'menu-item';
+  menu.dataset.menu = menuId;
+
+  const menuLabel = document.createElement('span');
+  menuLabel.className = 'menu-label';
+  menuLabel.textContent = label;
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'menu-dropdown';
+
+  menu.appendChild(menuLabel);
+  menu.appendChild(dropdown);
+  menuBar.appendChild(menu);
+  bindMenuItem(menu);
+
+  return menu;
+}
+
+function addMenuItem(menuId, item) {
+  const dropdown = getMenuDropdown(menuId);
+  if (!dropdown || !item || !item.label || typeof item.action !== 'function') return null;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = item.label;
+  if (item.id) button.dataset.pluginAction = item.id;
+  if (item.disabled === true) button.disabled = true;
+
+  if (item.shortcut) {
+    const shortcut = document.createElement('span');
+    shortcut.className = 'shortcut';
+    shortcut.textContent = item.shortcut;
+    button.appendChild(shortcut);
+  }
+
+  button.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (button.disabled) return;
+    try {
+      await item.action(window.PDFEditorContext);
+    } catch (err) {
+      console.error(err);
+      showToast('拡張機能の実行に失敗しました。', 'error');
+    } finally {
+      closeAllMenus();
+    }
+  });
+
+  dropdown.appendChild(button);
+  return button;
+}
+
+function addMenuSeparator(menuId) {
+  const dropdown = getMenuDropdown(menuId);
+  if (!dropdown) return null;
+  const separator = document.createElement('div');
+  separator.className = 'menu-separator';
+  dropdown.appendChild(separator);
+  return separator;
+}
+
+function openModal(modalOrId) {
+  const modal = typeof modalOrId === 'string' ? document.getElementById(modalOrId) : modalOrId;
+  if (modal) modal.style.display = 'flex';
+}
+
+function closeModal(modalOrId) {
+  const modal = typeof modalOrId === 'string' ? document.getElementById(modalOrId) : modalOrId;
+  if (modal) modal.style.display = 'none';
 }
 
 // === PDF.js設定 ===
@@ -1449,6 +1601,7 @@ function getPreviewRenderKey(tab, effectiveZoom) {
     tab.previewVersion || 0,
     tab.pageCount,
     effectiveZoom.toFixed(4),
+    getCanvasOutputScale({ maxScale: MAX_PREVIEW_CANVAS_OUTPUT_SCALE }).toFixed(4),
   ].join(':');
 }
 
@@ -1507,10 +1660,16 @@ function createPreviewPageElement(tab, pageIndex) {
 async function renderPreviewPageCanvas(pdfJsDoc, pageIndex, canvas, effectiveZoom) {
   const page = await pdfJsDoc.getPage(pageIndex + 1);
   const viewport = page.getViewport({ scale: BASE_PREVIEW_SCALE * effectiveZoom });
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
+  const canvasSetup = prepareHiDpiCanvas(canvas, viewport, {
+    maxScale: MAX_PREVIEW_CANVAS_OUTPUT_SCALE,
+    maxPixels: MAX_PREVIEW_CANVAS_PIXELS,
+  });
   const ctx = canvas.getContext('2d');
-  await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+  await page.render({
+    canvasContext: ctx,
+    viewport: viewport,
+    transform: canvasSetup.transform,
+  }).promise;
 }
 
 function scrollPreviewPageIntoView(pageIndex, block) {
@@ -1739,39 +1898,130 @@ function uint8ArrayToBase64(uint8Array) {
 }
 
 // === キーボードショートカット ===
+const NON_TEXT_INPUT_TYPES = [
+  'button',
+  'checkbox',
+  'color',
+  'file',
+  'hidden',
+  'image',
+  'radio',
+  'range',
+  'reset',
+  'submit',
+];
+
+function isEditableElement(element) {
+  if (!element) return false;
+  if (element.isContentEditable === true) return true;
+
+  const tagName = String(element.tagName || '').toLowerCase();
+  if (tagName === 'textarea' || tagName === 'select') return true;
+
+  if (tagName === 'input') {
+    const type = String(element.type || 'text').toLowerCase();
+    return !NON_TEXT_INPUT_TYPES.includes(type);
+  }
+
+  if (typeof element.getAttribute === 'function') {
+    const contentEditable = element.getAttribute('contenteditable');
+    if (contentEditable !== null) {
+      return String(contentEditable).toLowerCase() !== 'false';
+    }
+  }
+
+  return false;
+}
+
+function isEditableEventTarget(event) {
+  const target = event && event.target;
+  if (!target) return false;
+
+  if (typeof event.composedPath === 'function') {
+    const path = event.composedPath();
+    if (Array.isArray(path)) {
+      for (const pathTarget of path) {
+        if (isEditableElement(pathTarget)) return true;
+      }
+    }
+  }
+
+  if (isEditableElement(target)) return true;
+
+  if (typeof target.closest === 'function') {
+    const editableParent = target.closest('input, textarea, select, [contenteditable]');
+    return isEditableElement(editableParent);
+  }
+
+  return false;
+}
+
+function isTextEditingShortcut(event) {
+  const key = String(event.key || '').toLowerCase();
+  const hasModifier = event.ctrlKey || event.metaKey;
+
+  if (!hasModifier) {
+    return [
+      'backspace',
+      'delete',
+      'arrowleft',
+      'arrowright',
+      'arrowup',
+      'arrowdown',
+      'home',
+      'end',
+    ].includes(key);
+  }
+
+  return [
+    'a',
+    'c',
+    'x',
+    'v',
+    'z',
+    'y',
+    'backspace',
+    'delete',
+    'arrowleft',
+    'arrowright',
+    'home',
+    'end',
+  ].includes(key);
+}
+
 function initKeyboardShortcuts() {
   document.addEventListener('keydown', (e) => {
-    const targetTag = e.target && e.target.tagName ? e.target.tagName : '';
-    const inInput = targetTag === 'INPUT' || targetTag === 'TEXTAREA';
-    if (inInput && !e.ctrlKey && !e.altKey) return;
+    if (isEditableEventTarget(e) && isTextEditingShortcut(e)) return;
 
     const tab = App.getActiveTab();
+    const key = String(e.key || '').toLowerCase();
+    const hasPasteModifier = e.ctrlKey || e.metaKey;
 
-    if (e.ctrlKey && e.key === 'o') {
+    if (e.ctrlKey && key === 'o') {
       e.preventDefault();
       document.getElementById('file-input').click();
       return;
     }
 
-    if (e.ctrlKey && e.key === 's') {
+    if (e.ctrlKey && key === 's') {
       e.preventDefault();
       if (tab) downloadPdf();
       return;
     }
 
-    if (e.ctrlKey && !e.shiftKey && e.key === 'z') {
+    if (e.ctrlKey && !e.shiftKey && key === 'z') {
       e.preventDefault();
       performUndo();
       return;
     }
 
-    if (e.ctrlKey && e.shiftKey && e.key === 'Z') {
+    if (e.ctrlKey && e.shiftKey && key === 'z') {
       e.preventDefault();
       performRedo();
       return;
     }
 
-    if (e.ctrlKey && e.key === 'a') {
+    if (e.ctrlKey && key === 'a') {
       e.preventDefault();
       if (tab) {
         tab.selectedPages = Array.from({ length: tab.pageCount }, (_, i) => i);
@@ -1781,42 +2031,42 @@ function initKeyboardShortcuts() {
     }
 
     // Ctrl+C: コピー
-    if (e.ctrlKey && !e.shiftKey && e.key === 'c') {
+    if (e.ctrlKey && !e.shiftKey && key === 'c') {
       e.preventDefault();
       copyPages();
       return;
     }
 
     // Ctrl+X: カット
-    if (e.ctrlKey && e.key === 'x') {
+    if (e.ctrlKey && key === 'x') {
       e.preventDefault();
       cutPages();
       return;
     }
 
     // Ctrl+V: ペースト
-    if (e.ctrlKey && e.key === 'v') {
+    if (hasPasteModifier && key === 'v') {
       e.preventDefault();
       pastePages();
       return;
     }
 
     // Ctrl+Shift+D: ページ複製
-    if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+    if (e.ctrlKey && e.shiftKey && key === 'd') {
       e.preventDefault();
       duplicatePages();
       return;
     }
 
     // Ctrl+Shift+E: PDF分割
-    if (e.ctrlKey && e.shiftKey && e.key === 'E') {
+    if (e.ctrlKey && e.shiftKey && key === 'e') {
       e.preventDefault();
       showSplitDialog();
       return;
     }
 
     // Ctrl+G: グリッド表示切替
-    if (e.ctrlKey && e.key === 'g') {
+    if (e.ctrlKey && key === 'g') {
       e.preventDefault();
       toggleViewMode();
       return;
@@ -2534,6 +2784,87 @@ function initDialogs() {
   insertModal.addEventListener('click', (e) => { if (e.target === insertModal) insertModal.style.display = 'none'; });
 }
 
+window.PDFEditorContext = {
+  App: App,
+  PDFLib: PDFLib,
+  getActiveTab: () => App.getActiveTab(),
+  refreshTab: refreshTab,
+  refreshPdfJsCache: refreshPdfJsCache,
+  updateUI: updateUI,
+  showToast: showToast,
+  pushUndo: pushUndo,
+  addTopMenu: addTopMenu,
+  addMenuItem: addMenuItem,
+  addMenuSeparator: addMenuSeparator,
+  openModal: openModal,
+  closeModal: closeModal,
+};
+
+window.__PDF_EDITOR_PLUGIN_STATUS__ = {
+  requested: false,
+  loaded: false,
+  registered: 0,
+  pluginIds: [],
+  error: null,
+  assetUrl: null,
+  assetReturned: null,
+  message: null,
+};
+
+const OPTIONAL_PLUGIN_URL = "<?!= getAssetUrl('Plugin') ?>";
+
+window.PDFEditorPlugins = {
+  plugins: [],
+
+  register(plugin) {
+    if (!plugin || !plugin.id) return;
+    this.plugins.push(plugin);
+    window.__PDF_EDITOR_PLUGIN_STATUS__.registered = this.plugins.length;
+    window.__PDF_EDITOR_PLUGIN_STATUS__.pluginIds = this.plugins.map(item => item.id);
+
+    if (typeof plugin.setup === 'function') {
+      try {
+        plugin.setup(window.PDFEditorContext);
+      } catch (err) {
+        window.__PDF_EDITOR_PLUGIN_STATUS__.error = err && err.message ? err.message : String(err);
+        console.error(err);
+        showToast('拡張機能の読み込みに失敗しました。', 'error');
+      }
+    }
+  }
+};
+
+function loadOptionalPlugin() {
+  const status = window.__PDF_EDITOR_PLUGIN_STATUS__;
+  status.requested = true;
+  status.assetUrl = OPTIONAL_PLUGIN_URL;
+  console.log('[PDF Editor] Optional Plugin asset URL:', OPTIONAL_PLUGIN_URL);
+
+  const script = document.createElement('script');
+  script.src = OPTIONAL_PLUGIN_URL;
+  script.onload = () => {
+    status.loaded = true;
+    console.log('[PDF Editor] Optional Plugin loaded.', {
+      assetReturned: status.assetReturned,
+      registered: status.registered,
+      pluginIds: status.pluginIds,
+      message: status.message,
+    });
+    if (status.assetReturned === false) {
+      console.log('[PDF Editor] Optional Plugin is not installed.');
+      return;
+    }
+    if (status.registered === 0) {
+      console.warn('[PDF Editor] Optional Plugin loaded but no plugins were registered.', status);
+    }
+  };
+  script.onerror = event => {
+    status.error = 'Plugin asset failed to load';
+    console.warn('[PDF Editor] Optional Plugin failed to load.', event);
+  };
+  document.head.appendChild(script);
+}
+
 
 // === 初期化 ===
 document.addEventListener('DOMContentLoaded', () => {
@@ -2548,6 +2879,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSidebarResizer();
   initDragAndDrop();
   initDialogs();
+  loadOptionalPlugin();
   document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
   if (window.addEventListener) {
     window.addEventListener('resize', () => {
