@@ -150,13 +150,35 @@ Plugin.html
 
 注意点:
 
-- Apps Script で HTML ファイルを追加するときは、名前を `PdfLib` / `Plugin` と入力します。エディタ上の表示は `PdfLib.html` / `Plugin.html` になります。
+- 必須ファイル名は `Code.gs`、`index.html`、`PdfLib.html` の3つです。
+- Apps Script で HTML ファイルを追加するときは、名前を `index` / `PdfLib` / `Plugin` と入力し、入力欄には `.html` 拡張子を付けません。エディタ上では `index.html` / `PdfLib.html` / `Plugin.html` と表示されます。
 - `Code.gs` の `HtmlService.createTemplateFromFile()` や `getAssetUrl()` に渡す名前は、拡張子なしの `PdfLib` / `Plugin` です。
 - `PdfLib.html` と `Plugin.html` の中身は JavaScript 本文だけです。`<script>` タグで囲まないでください。
 - `Plugin.html` は任意です。3ファイル構成（`Code.gs` / `index.html` / `PdfLib.html`）では標準版として動作します。
-- `Plugin.html` を追加または更新したら、Web アプリを新しいバージョンとして再デプロイしてください。
+- 必須3ファイルは、必ず同じ [GitHub Release](https://github.com/takikomirice/PDFeditor-on-GWS/releases) から取得してください。`main` の個別ファイルと過去Releaseのファイルを混在させないでください。
+- ファイルを追加または更新したら、Web アプリを新しいバージョンとして再デプロイしてください。既存デプロイを開き直すだけでは更新内容は反映されません。
 - 反映されない場合は、ブラウザキャッシュ、開いている Web アプリ URL、デプロイ版の取り違えを確認してください。
 - Web アプリ URL に `?asset=Plugin` を付けて直接開くと、Plugin の JavaScript 本文、または `Optional plugin not installed` の診断コメントが返るか確認できます。
+
+#### 手動投入後に画面だけ表示され、メニューが動かない場合
+
+1. GitHub Release の `PdfLib.html` を **Raw表示** で開き、Apps Script 側とファイル末尾を比較します。現在の形式では、末尾に `__PDF_EDITOR_VENDOR_INFO__` と `appCompatibility`、`pdfLib`、`pdfJs` の情報があり、最後の空でない行は `})(typeof window !== 'undefined' ? window : globalThis);` です。この部分がなければ、貼り付けが途中で切れているか、別Releaseのファイルです。
+2. `PdfLib.html` の先頭や末尾へ `<script>` / `</script>` を追加していないことを確認します。貼り付けるのはファイル本文だけです。
+3. 使用中の Web アプリ URL の末尾へ `?asset=PdfLib` を付けて直接開き、`PdfLib.html` の JavaScript 本文が返ることを確認します。エラー文や空の応答になる場合は、ファイル名、貼り付け内容、`Code.gs` を確認します。
+4. 必須3ファイルが同じRelease由来であることを確認し、Apps Script の「デプロイを管理」から **新しいバージョン** を作成してWebアプリを更新します。
+5. 更新後に表示された `/exec` URLが、実際にブラウザで開いているURLと同じか確認します。ブックマーク、共有済みリンク、別タブに残った古いデプロイURLにも注意してください。
+6. ブラウザの開発者ツール（Chrome / Edgeでは `F12` または `Ctrl+Shift+I`）で **Console** を開き、`[PDF Editor]` のエラーと、その直後の診断オブジェクトを確認します。診断情報を管理者へ伝えるときは、PDF内容、編集キー、トークンなどをコピーしないでください。
+
+画面に「PDFライブラリを正常に読み込めませんでした」と表示された場合、「不足または不一致」に示された項目を確認します。
+
+- `window.PDFLib` / `window.PDFLib.PDFDocument`: `pdf-lib` 部分が読み込まれていないか、途中で壊れています。
+- `window.pdfjsLib` / `window.pdfjsLib.getDocument` / `window.pdfjsLib.GlobalWorkerOptions`: PDF.js 部分が欠落しているか、そこへ到達する前にJavaScriptの解釈が停止しています。
+- `window.__PDF_EDITOR_VENDOR_INFO__` / `appCompatibility`: `PdfLib.html` の末尾が欠けているか、`index.html` と異なるRelease由来です。
+- 「PDFエディターを起動できませんでした」: 必須ライブラリ確認後の初期化で例外が発生しています。Console の `application-initialization` 診断にある `message` と `stack` を管理者へ伝えてください。
+
+Console の `required-library-check` 診断には、各ライブラリ/APIの有無、互換バージョン、ブラウザ情報、クエリ文字列を除いたWebアプリURLが表示されます。編集キー、トークン、PDFやファイルの内容は出力しません。
+
+`?asset=PdfLib` で大量のJavaScript文字列が返ることは、asset配信経路が動いている確認にはなりますが、**JavaScript全体が欠落なく、構文エラーなしで最後まで実行された証明にはなりません**。必ず画面の起動診断とConsoleの結果も併せて確認してください。
 
 ### 3. Web アプリとしてデプロイ
 
