@@ -318,6 +318,12 @@ runTest('PDF dependency asset avoids nested script tags during GAS rendering', (
   assert.match(codeSource, /function\s+getAssetUrl\s*\(\s*assetName\s*\)/);
 });
 
+runTest('PdfLib.html compiles as complete JavaScript', () => {
+  assert.doesNotThrow(() => {
+    new vm.Script(pdfLibHtml, { filename: 'PdfLib.html' });
+  });
+});
+
 runTest('optional plugin diagnostics do not block standard initialization', () => {
   const context = loadContext({
     console: {
