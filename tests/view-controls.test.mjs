@@ -37,6 +37,11 @@ const stylesHtml = extractStyleBlock(indexHtml);
 const scriptSource = extractScriptSourceByMarker(indexHtml, '// === 状態管理 ===');
 const workerSource = extractWorkerSource(indexHtml);
 const pdfDependencySource = pdfLibHtml.trim();
+const EXPECTED_VENDOR_INFO = {
+  appCompatibility: '1',
+  pdfLib: '1.17.1',
+  pdfJs: '3.11.174',
+};
 
 function createElementStub() {
   const children = [];
@@ -87,16 +92,23 @@ function createElementStub() {
 }
 
 function loadContext(overrides = {}) {
+  const {
+    setup,
+    ...contextOverrides
+  } = overrides;
   const documentListeners = [];
+  const headElements = [];
   let context;
   const documentStub = {
     body: createElementStub(),
     documentElement: createElementStub(),
     head: {
       appendChild(element) {
+        headElements.push(element);
         if (element.textContent) {
           vm.runInContext(element.textContent, context, { filename: 'inline-worker-fallback.js' });
         }
+        return element;
       },
     },
     addEventListener(type, handler) {
@@ -129,7 +141,15 @@ function loadContext(overrides = {}) {
       },
     },
     pdfjsLib: {
+      getDocument() {},
       GlobalWorkerOptions: {},
+    },
+    __PDF_EDITOR_VENDOR_INFO__: { ...EXPECTED_VENDOR_INFO },
+    navigator: {
+      userAgent: 'PDFeditor-on-GWS test browser',
+    },
+    location: {
+      href: 'https://example.test/macros/s/deployment/exec?editingKey=secret#fragment',
     },
     google: {
       script: {
@@ -148,14 +168,87 @@ function loadContext(overrides = {}) {
     setTimeout,
     clearTimeout,
     __documentListeners: documentListeners,
-    ...overrides,
+    __headElements: headElements,
+    ...contextOverrides,
   };
   context.globalThis = context;
   context.window.globalThis = context;
+  context.window.PDFLib = context.PDFLib;
+  context.window.pdfjsLib = context.pdfjsLib;
+  context.window.__PDF_EDITOR_VENDOR_INFO__ = context.__PDF_EDITOR_VENDOR_INFO__;
+  context.window.navigator = context.navigator;
+  context.window.location = context.location;
+  if (typeof setup === 'function') {
+    setup({ context, document: documentStub });
+  }
 
   vm.createContext(context);
   vm.runInContext(scriptSource, context, { filename: 'index.html' });
   return context;
+}
+
+function createConsoleCapture() {
+  const entries = [];
+  return {
+    entries,
+    console: {
+      error(...args) { entries.push({ level: 'error', args }); },
+      log(...args) { entries.push({ level: 'log', args }); },
+      warn(...args) { entries.push({ level: 'warn', args }); },
+    },
+  };
+}
+
+function runDocumentListeners(context, type) {
+  context.__documentListeners
+    .filter(listener => listener.type === type)
+    .forEach(listener => listener.handler());
+}
+
+function findConsoleDiagnostic(entries, stage) {
+  for (const entry of entries) {
+    for (const value of entry.args) {
+      if (value && typeof value === 'object' && value.stage === stage) {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+function assertRequiredLibraryFailure(overrides, expectedMissingText, expectedDiagnostic) {
+  const capture = createConsoleCapture();
+  const context = loadContext({
+    ...overrides,
+    console: capture.console,
+  });
+
+  assert.equal(context.window.PDFEditorContext, undefined);
+  assert.equal(context.window.PDFEditorPlugins, undefined);
+  assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__, undefined);
+  assert.equal(
+    context.__documentListeners.some(listener => listener.type === 'DOMContentLoaded'),
+    false,
+    'normal initialization must not be registered'
+  );
+  assert.equal(
+    context.__headElements.some(element => element.src),
+    false,
+    'Plugin loading must not start'
+  );
+  assert.match(context.document.body.innerHTML, /PDFライブラリを正常に読み込めませんでした/);
+  assert.match(context.document.body.innerHTML, new RegExp(expectedMissingText));
+  assert.match(context.document.body.innerHTML, /PdfLib\.html/);
+  assert.match(context.document.body.innerHTML, /index\.html/);
+  assert.match(context.document.body.innerHTML, /Code\.gs/);
+  assert.match(context.document.body.innerHTML, /\?asset=PdfLib/);
+
+  const diagnostic = findConsoleDiagnostic(capture.entries, 'required-library-check');
+  assert.ok(diagnostic, 'required-library-check diagnostic should be logged');
+  assert.equal(diagnostic.location, 'https://example.test/macros/s/deployment/exec');
+  for (const [key, value] of Object.entries(expectedDiagnostic)) {
+    assert.equal(diagnostic[key], value, `${key} diagnostic should match`);
+  }
 }
 
 function runTest(name, fn) {
@@ -225,6 +318,12 @@ runTest('PDF dependency asset avoids nested script tags during GAS rendering', (
   assert.match(codeSource, /function\s+getAssetUrl\s*\(\s*assetName\s*\)/);
 });
 
+runTest('PdfLib.html compiles as complete JavaScript', () => {
+  assert.doesNotThrow(() => {
+    new vm.Script(pdfLibHtml, { filename: 'PdfLib.html' });
+  });
+});
+
 runTest('optional plugin diagnostics do not block standard initialization', () => {
   const context = loadContext({
     console: {
@@ -240,6 +339,198 @@ runTest('optional plugin diagnostics do not block standard initialization', () =
   assert.deepEqual(Array.from(context.window.__PDF_EDITOR_PLUGIN_STATUS__.pluginIds), []);
   assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__.error, null);
   assert.equal(typeof context.loadOptionalPlugin, 'function');
+});
+
+runTest('valid required libraries continue normal initialization', () => {
+  const capture = createConsoleCapture();
+  const context = loadContext({ console: capture.console });
+
+  runDocumentListeners(context, 'DOMContentLoaded');
+
+  assert.equal(typeof context.window.PDFEditorContext, 'object');
+  assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__.requested, true);
+  assert.equal(
+    context.__headElements.filter(element => element.src).length,
+    1,
+    'normal initialization should request the optional Plugin asset once'
+  );
+  assert.doesNotMatch(context.document.body.innerHTML, /起動できません/);
+  const diagnostic = context.window.__PDF_EDITOR_STARTUP_DIAGNOSTIC__;
+  assert.equal(diagnostic.stage, 'required-library-check');
+  assert.equal(diagnostic.pdfLibDefined, true);
+  assert.equal(diagnostic.pdfDocumentDefined, true);
+  assert.equal(diagnostic.pdfJsDefined, true);
+  assert.equal(diagnostic.getDocumentDefined, true);
+  assert.equal(diagnostic.globalWorkerOptionsDefined, true);
+  assert.equal(diagnostic.appCompatibilityMatches, true);
+});
+
+runTest('missing optional Plugin keeps the standard application running', () => {
+  const capture = createConsoleCapture();
+  const context = loadContext({ console: capture.console });
+
+  runDocumentListeners(context, 'DOMContentLoaded');
+  const pluginScript = context.__headElements.find(element => element.src);
+  context.window.__PDF_EDITOR_PLUGIN_STATUS__.assetReturned = false;
+  context.window.__PDF_EDITOR_PLUGIN_STATUS__.message = 'Optional plugin not installed';
+  pluginScript.onload();
+
+  assert.equal(typeof context.window.PDFEditorContext, 'object');
+  assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__.loaded, true);
+  assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__.registered, 0);
+  assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__.error, null);
+});
+
+runTest('available optional Plugin registers after standard initialization', () => {
+  const capture = createConsoleCapture();
+  const context = loadContext({ console: capture.console });
+
+  runDocumentListeners(context, 'DOMContentLoaded');
+  const pluginScript = context.__headElements.find(element => element.src);
+  let setupContext = null;
+  context.window.__PDF_EDITOR_PLUGIN_STATUS__.assetReturned = true;
+  context.window.PDFEditorPlugins.register({
+    id: 'startup-test-plugin',
+    setup(editorContext) {
+      setupContext = editorContext;
+    },
+  });
+  pluginScript.onload();
+
+  assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__.loaded, true);
+  assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__.registered, 1);
+  assert.deepEqual(
+    Array.from(context.window.__PDF_EDITOR_PLUGIN_STATUS__.pluginIds),
+    ['startup-test-plugin']
+  );
+  assert.equal(setupContext, context.window.PDFEditorContext);
+});
+
+runTest('startup diagnosis stops before initialization when PDFLib is missing', () => {
+  assertRequiredLibraryFailure(
+    { PDFLib: undefined },
+    'window\\.PDFLib',
+    {
+      pdfLibDefined: false,
+      pdfDocumentDefined: false,
+      pdfJsDefined: true,
+      getDocumentDefined: true,
+      globalWorkerOptionsDefined: true,
+    }
+  );
+});
+
+runTest('startup diagnosis reports a missing PDFDocument API', () => {
+  assertRequiredLibraryFailure(
+    { PDFLib: {} },
+    'window\\.PDFLib\\.PDFDocument',
+    {
+      pdfLibDefined: true,
+      pdfDocumentDefined: false,
+      pdfJsDefined: true,
+      getDocumentDefined: true,
+      globalWorkerOptionsDefined: true,
+    }
+  );
+});
+
+runTest('startup diagnosis stops before initialization when pdfjsLib is missing', () => {
+  assertRequiredLibraryFailure(
+    { pdfjsLib: undefined },
+    'window\\.pdfjsLib',
+    {
+      pdfLibDefined: true,
+      pdfDocumentDefined: true,
+      pdfJsDefined: false,
+      getDocumentDefined: false,
+      globalWorkerOptionsDefined: false,
+    }
+  );
+});
+
+runTest('startup diagnosis reports a missing getDocument API', () => {
+  assertRequiredLibraryFailure(
+    { pdfjsLib: { GlobalWorkerOptions: {} } },
+    'window\\.pdfjsLib\\.getDocument',
+    {
+      pdfLibDefined: true,
+      pdfDocumentDefined: true,
+      pdfJsDefined: true,
+      getDocumentDefined: false,
+      globalWorkerOptionsDefined: true,
+    }
+  );
+});
+
+runTest('startup diagnosis reports missing GlobalWorkerOptions', () => {
+  assertRequiredLibraryFailure(
+    { pdfjsLib: { getDocument() {} } },
+    'window\\.pdfjsLib\\.GlobalWorkerOptions',
+    {
+      pdfLibDefined: true,
+      pdfDocumentDefined: true,
+      pdfJsDefined: true,
+      getDocumentDefined: true,
+      globalWorkerOptionsDefined: false,
+    }
+  );
+});
+
+runTest('startup diagnosis rejects incompatible PdfLib metadata', () => {
+  assertRequiredLibraryFailure(
+    {
+      __PDF_EDITOR_VENDOR_INFO__: {
+        appCompatibility: '0',
+        pdfLib: '1.17.1',
+        pdfJs: '3.11.174',
+      },
+    },
+    'appCompatibility',
+    {
+      vendorInfoDefined: true,
+      actualAppCompatibility: '0',
+      expectedAppCompatibility: '1',
+      appCompatibilityMatches: false,
+    }
+  );
+});
+
+runTest('startup diagnosis rejects a PdfLib asset truncated before metadata', () => {
+  assertRequiredLibraryFailure(
+    { __PDF_EDITOR_VENDOR_INFO__: undefined },
+    'window\\.__PDF_EDITOR_VENDOR_INFO__',
+    {
+      vendorInfoDefined: false,
+      actualAppCompatibility: null,
+      expectedAppCompatibility: '1',
+      appCompatibilityMatches: false,
+    }
+  );
+});
+
+runTest('startup exceptions show an error and do not load Plugin', () => {
+  const capture = createConsoleCapture();
+  const context = loadContext({
+    console: capture.console,
+    setup({ document }) {
+      document.documentElement.setAttribute = () => {
+        throw new Error('theme initialization failed');
+      };
+    },
+  });
+
+  assert.doesNotThrow(() => runDocumentListeners(context, 'DOMContentLoaded'));
+  assert.equal(context.window.__PDF_EDITOR_PLUGIN_STATUS__.requested, false);
+  assert.equal(
+    context.__headElements.some(element => element.src),
+    false,
+    'Plugin loading must not start after an initialization exception'
+  );
+  assert.match(context.document.body.innerHTML, /PDFエディターを起動できませんでした/);
+  const diagnostic = findConsoleDiagnostic(capture.entries, 'application-initialization');
+  assert.ok(diagnostic, 'application-initialization diagnostic should be logged');
+  assert.match(diagnostic.message, /theme initialization failed/);
+  assert.match(diagnostic.stack, /theme initialization failed/);
 });
 
 runTest('Scripts configures the PDF.js worker from bundled source without external URLs', () => {
@@ -463,6 +754,14 @@ runTest('bundled PDF dependencies are present without runtime CDN access', () =>
   vm.runInContext(pdfDependencySource, dependencyContext, { filename: 'PdfLib.html' });
   assert.ok(dependencyContext.PDFLib, 'PDFLib global is missing after evaluating PdfLib.html');
   assert.ok(dependencyContext.pdfjsLib, 'pdfjsLib global is missing after evaluating PdfLib.html');
+  assert.deepEqual(
+    {
+      appCompatibility: dependencyContext.__PDF_EDITOR_VENDOR_INFO__?.appCompatibility,
+      pdfLib: dependencyContext.__PDF_EDITOR_VENDOR_INFO__?.pdfLib,
+      pdfJs: dependencyContext.__PDF_EDITOR_VENDOR_INFO__?.pdfJs,
+    },
+    EXPECTED_VENDOR_INFO
+  );
 });
 
 runTest('normalizeZoomShortcutKey maps existing and JP keyboard shortcuts', () => {
